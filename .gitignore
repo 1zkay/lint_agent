@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Virtual environments
+.venv/
+venv/
+env/
+.conda/
+
+# Generated reports and runtime artifacts
+reports/
+*.log
+*.tmp
+
+# Chainlit / local storage
+.chainlit/
+.files/
+
+# RAG / vector indexes
+rag_index*/
+*.faiss
+*.pkl
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archives
+*.rar
+*.zip

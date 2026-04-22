@@ -1,0 +1,125 @@
+{
+  "overall_result": "严重缺陷",
+  "summary": {
+    "knowledge_base": "自建知识库",
+    "report_path": "reports/example_lint.csv",
+    "source_files": [
+      "rtl/example.sv"
+    ],
+    "output_path": "reports/verilog_lint_triage_result_20260321_153000.json",
+    "summary_text": "本次诊断识别出1条严重真实缺陷、1条误报，以及1条漏报缺陷。"
+  },
+  "lint_items": [
+    {
+      "report_line_numbers": [
+        2,
+        4
+      ],
+      "raw_report_lines": [
+        "rtl/example.sv,18,NBSEQ,warning,Blocking assignment in sequential logic",
+        "rtl/example.sv,18,SEQCHK,warning,Blocking assignment in sequential logic"
+      ],
+      "report_rule_id": [
+        "NBSEQ",
+        "SEQCHK"
+      ],
+      "report_severity": [
+        "warning",
+        "warning"
+      ],
+      "file": "rtl/example.sv",
+      "code_line": 18,
+      "category": "严重",
+      "issue": "时钟触发的 always 块中出现了阻塞赋值。",
+      "kb_rules": [
+        {
+          "id": "R-9-4",
+          "severity_default": "Critical",
+          "description": "Sequential circuits must use non-blocking assignments (<=); blocking assignments (=) are prohibited."
+        }
+      ],
+      "why": "该赋值位于边沿触发的时序块中，可能改变寄存器更新语义，因此属于真实缺陷。",
+      "evidence": "always @(posedge clk) begin state = next_state; end",
+      "fix_hint": "将该时序块中的阻塞赋值改为非阻塞赋值。"
+    },
+    {
+      "report_line_numbers": [
+        3
+      ],
+      "raw_report_lines": [
+        "rtl/example.sv,27,WIDTH,warning,Possible width mismatch"
+      ],
+      "report_rule_id": [
+        "WIDTH"
+      ],
+      "report_severity": [
+        "warning"
+      ],
+      "file": "rtl/example.sv",
+      "code_line": 27,
+      "category": "误报",
+      "issue": "lint 提示可能存在位宽不匹配，但源码中的显式位宽转换表明该写法是有意为之。",
+      "kb_rules": [],
+      "why": "源码使用了明确的定长转换，转换后左右位宽一致，因此该报告行不构成真实缺陷。",
+      "evidence": "assign out[7:0] = 8'(in_value);",
+      "fix_hint": "无需修改。"
+    }
+  ],
+  "missed_defects": [
+    {
+      "id": "MISSED_001",
+      "file": "rtl/example.sv",
+      "code_line": 34,
+      "category": "一般",
+      "issue": "组合逻辑 always 块的敏感列表遗漏了一个被读取的信号。",
+      "kb_rules": [
+        {
+          "id": "R-12-9",
+          "severity_default": "Critical",
+          "description": "Sensitive signals in the sensitivity list must be complete, with no omissions or redundancies."
+        }
+      ],
+      "why_missed_by_lint": "lint 报告没有给出该块的告警，但源码中确实读取了未列入敏感列表的信号。",
+      "evidence": "always @(a or b) y = a & b & c;",
+      "fix_hint": "补齐敏感列表，或改写为 always @* / always_comb。"
+    }
+  ],
+  "standard_file_diagnosis": [
+    {
+      "file": "rtl/example.sv",
+      "summary_text": "基于适用的 IEEE 标准和/或 Vivado 综合文档对该文件做独立诊断，识别出2条严重问题和1条提示项，其中同时包含 IEEE 与 Vivado 依据。",
+      "findings": [
+        {
+          "id": "STD_001",
+          "code_line": 18,
+          "category": "严重",
+          "issue": "时序过程块中使用阻塞赋值，不符合 IEEE 1800-2017 对时序建模的推荐语义。",
+          "standard_pages": "IEEE 1800-2017 p.316-317",
+          "why": "该语句位于时钟边沿触发的 always 块中，阻塞赋值可能引入仿真与综合语义偏差，属于需要立即修复的问题。",
+          "evidence": "always @(posedge clk) begin state = next_state; end",
+          "fix_hint": "将阻塞赋值改为非阻塞赋值，并复核相关寄存器更新顺序。"
+        },
+        {
+          "id": "STD_002",
+          "code_line": 34,
+          "category": "提示",
+          "issue": "建议将组合逻辑过程块改写为 always_comb，以便在语言语义和综合意图上更清晰。",
+          "standard_pages": "IEEE 1800-2017 p.324-326",
+          "why": "源码当前使用传统 always 形式，虽然可以工作，但 always_comb 更能约束敏感列表完整性并明确组合逻辑意图。",
+          "evidence": "always @(a or b) y = a & b & c;",
+          "fix_hint": "将该组合过程块改写为 always_comb，并在修改后重新检查组合逻辑完整性。"
+        },
+        {
+          "id": "STD_003",
+          "code_line": 48,
+          "category": "严重",
+          "issue": "组合逻辑生成的 gated_clk 被当作时钟使用，不符合 Vivado 综合对时钟资源使用的建议。",
+          "standard_pages": "Vivado Synthesis Guide p.55",
+          "why": "在 FPGA 设计中，时钟应由专用全局时钟资源驱动。将 clk 与 en 的组合逻辑结果直接作为时钟，容易引入毛刺并带来时序收敛风险。",
+          "evidence": "assign gated_clk = clk & en;\\nalways @(posedge gated_clk) begin q <= d; end",
+          "fix_hint": "保持 clk 为全局时钟，将 en 改为寄存器使能条件，避免使用组合逻辑生成的 gated clock。"
+        }
+      ]
+    }
+  ]
+}
