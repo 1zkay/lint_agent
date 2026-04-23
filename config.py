@@ -40,6 +40,23 @@ class Config:
         return os.getenv(key, default).strip().lower() in ("1", "true", "yes", "y", "on")
 
     @staticmethod
+    def _optional_bool_env(key: str) -> bool | None:
+        raw_value = os.getenv(key, "").strip()
+        value = raw_value.lower()
+        if not value:
+            return None
+        if value in ("1", "true", "yes", "y", "on"):
+            return True
+        if value in ("0", "false", "no", "n", "off", "none"):
+            return False
+        logger.warning(
+            "Ignoring unsupported %s=%r; use true or false",
+            key,
+            raw_value,
+        )
+        return None
+
+    @staticmethod
     def _slug_env_value(value: str, default: str = "value") -> str:
         slug = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
         return slug or default
@@ -187,6 +204,7 @@ class Config:
         self.llm_temperature = float(os.getenv("LLM_TEMPERATURE", "0.1"))
         self.llm_max_tokens = int(os.getenv("LLM_MAX_TOKENS", "81920"))
         self.llm_timeout = int(os.getenv("LLM_TIMEOUT", "120"))
+        self.llm_reasoning = self._optional_bool_env("LLM_REASONING")
         self.llm_model_presets: list[dict[str, str]] = self._collect_llm_model_presets(
             self.llm_model,
             self.llm_base_url,
