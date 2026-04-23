@@ -28,6 +28,7 @@ reports/
 # Chainlit / local storage
 .chainlit/
 .files/
+.local/
 
 # RAG / vector indexes
 rag_index*/

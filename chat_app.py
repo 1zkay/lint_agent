@@ -112,10 +112,6 @@ logger = logging.getLogger(__name__)
 
 _FILESYSTEM_TOOL_NAMES = ("ls", "read_file", "write_file", "edit_file", "glob", "grep")
 
-_LOCAL_MINIO_EXE = Path(r"D:\minio\bin\minio.exe")
-_LOCAL_MINIO_DATA_DIR = Path(r"D:\minio\data")
-_LOCAL_MINIO_CONSOLE_PORT = 9001
-_LOCAL_MINIO_START_TIMEOUT_SECS = 15.0
 _LOCAL_MINIO_PROCESS: subprocess.Popen | None = None
 
 
@@ -137,6 +133,9 @@ def _start_local_minio_if_needed() -> None:
     if os.name != "nt":
         return
 
+    if not config.local_minio_auto_start:
+        return
+
     if _LOCAL_MINIO_PROCESS and _LOCAL_MINIO_PROCESS.poll() is None:
         return
 
@@ -149,11 +148,21 @@ def _start_local_minio_if_needed() -> None:
     if _can_connect(host or "127.0.0.1", port):
         return
 
-    if not _LOCAL_MINIO_EXE.exists():
-        logger.warning("[chat_app] Local MinIO executable not found: %s", _LOCAL_MINIO_EXE)
+    if not config.local_minio_exe:
+        logger.warning("[chat_app] LOCAL_MINIO_EXE is empty; skip local MinIO auto-start")
+        return
+    if not config.local_minio_data_dir:
+        logger.warning("[chat_app] LOCAL_MINIO_DATA_DIR is empty; skip local MinIO auto-start")
         return
 
-    _LOCAL_MINIO_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    local_minio_exe = Path(config.local_minio_exe)
+    local_minio_data_dir = Path(config.local_minio_data_dir)
+
+    if not local_minio_exe.exists():
+        logger.warning("[chat_app] Local MinIO executable not found: %s", local_minio_exe)
+        return
+
+    local_minio_data_dir.mkdir(parents=True, exist_ok=True)
 
     minio_env = os.environ.copy()
     if config.s3_access_key:
@@ -164,13 +173,13 @@ def _start_local_minio_if_needed() -> None:
     try:
         _LOCAL_MINIO_PROCESS = subprocess.Popen(
             [
-                str(_LOCAL_MINIO_EXE),
+                str(local_minio_exe),
                 "server",
-                str(_LOCAL_MINIO_DATA_DIR),
+                str(local_minio_data_dir),
                 "--address",
                 f":{port}",
                 "--console-address",
-                f":{_LOCAL_MINIO_CONSOLE_PORT}",
+                f":{config.local_minio_console_port}",
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -182,7 +191,7 @@ def _start_local_minio_if_needed() -> None:
         _LOCAL_MINIO_PROCESS = None
         return
 
-    deadline = time.monotonic() + _LOCAL_MINIO_START_TIMEOUT_SECS
+    deadline = time.monotonic() + config.local_minio_start_timeout
     while time.monotonic() < deadline:
         if _can_connect(host or "127.0.0.1", port):
             logger.info("[chat_app] Local MinIO started")

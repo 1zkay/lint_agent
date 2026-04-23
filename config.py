@@ -280,6 +280,21 @@ class Config:
         self.s3_access_key = os.getenv("APP_AWS_ACCESS_KEY", "").strip()
         self.s3_secret_key = os.getenv("APP_AWS_SECRET_KEY", "").strip()
         self.s3_endpoint_url = os.getenv("DEV_AWS_ENDPOINT", "").strip() or None
+        self.local_minio_auto_start = self._bool_env("LOCAL_MINIO_AUTO_START", "false")
+        local_minio_exe = os.getenv("LOCAL_MINIO_EXE", "").strip()
+        local_minio_data_dir = os.getenv("LOCAL_MINIO_DATA_DIR", "").strip()
+        self.local_minio_exe = (
+            str(self._resolve_env_path(local_minio_exe, base_dir=app_dir))
+            if local_minio_exe
+            else ""
+        )
+        self.local_minio_data_dir = (
+            str(self._resolve_env_path(local_minio_data_dir, base_dir=app_dir))
+            if local_minio_data_dir
+            else ""
+        )
+        self.local_minio_console_port = int(os.getenv("LOCAL_MINIO_CONSOLE_PORT", "").strip() or "9001")
+        self.local_minio_start_timeout = float(os.getenv("LOCAL_MINIO_START_TIMEOUT", "").strip() or "15")
 
         # ── OpenRouter ───────────────────────────────────────────────────────
         self.openrouter_referer = os.getenv("OPENROUTER_REFERER", "https://github.com/alint-pro").strip()
