@@ -22,11 +22,11 @@ from typing import Literal
 
 from langgraph.graph import StateGraph, START, END
 
-from agent.state import AlintWorkflowState
-from agent.nodes.lint_node import run_lint_node
-from agent.nodes.structure_node import run_structure_node
-from agent.nodes.sources_node import run_sources_node
-from agent.nodes.organize_node import run_organize_node
+from .state import AlintWorkflowState
+from .nodes.lint_node import run_lint_node
+from .nodes.structure_node import run_structure_node
+from .nodes.sources_node import run_sources_node
+from .nodes.organize_node import run_organize_node
 
 logger = logging.getLogger(__name__)
 

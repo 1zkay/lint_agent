@@ -184,11 +184,11 @@ lint-agent -auto-reject "删除这个文件"
 
 - `chat_app.py` 仍按原方式启动 Chainlit。
 - `langgraph_server/agent_runtime.py` 只服务 LangGraph Agent Server。
-- 两边能力应保持对齐，但运行时入口分离，避免改 Agent Server 时影响现有 Chainlit 端。
+- 两边能力应保持对齐；共享 prompt 和兼容补丁放在 `agent_runtime/`、`compat/`，入口生命周期仍然分离。
 
 ## 冗余与边界
 
-当前保留的重复主要是 `chat_app.py` 和 `agent_runtime.py` 各自构建一套 runtime。这是有意保留的兼容边界，避免 Chainlit 端行为被 Agent Server 优化影响。
+当前保留的重复主要是 `chat_app.py` 和 `agent_runtime.py` 各自管理一套入口生命周期。这是有意保留的兼容边界，避免 Chainlit 端行为被 Agent Server 优化影响。
 
 当前已移除的冗余：
 

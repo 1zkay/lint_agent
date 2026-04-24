@@ -33,7 +33,7 @@ LangChain create_agent
 MCP Client over stdio
   |
   v
-FastMCP Server: mcp_lint.py
+FastMCP Server: python -m mcp_server.server
   |-- MCP tools
   |-- MCP resources
   |-- MCP prompts
@@ -50,12 +50,13 @@ LangGraph ALINT workflow
 
 | Entry | File | Purpose |
 | --- | --- | --- |
-| Chainlit app | `chat_app.py` | Main web chat UI and agent runtime |
-| MCP server | `mcp_lint.py` | Exposes EDA tools, resources, and prompts |
-| LangGraph workflow | `agent/graph.py` | Deterministic ALINT analysis pipeline |
-| Yosys backend | `AST.py` | AST, RTLIL, CFG/DDG/DFG, and netlist generation |
-| Agentic RAG | `agentic_rag.py` | Reference-document retrieval and answer generation |
-| Long-term memory | `long_term_memory.py` | User profile and durable memory tools |
+| Chainlit app | `chat_app.py` | Chainlit compatibility entrypoint and message streaming handler |
+| MCP server | `mcp_server/server.py` | FastMCP server assembly |
+| MCP implementation | `mcp_server/` | Exposes EDA tools, resources, and prompts |
+| LangGraph workflow | `alint_workflow/graph.py` | Deterministic ALINT analysis pipeline |
+| Yosys backend | `eda/ast.py` | AST, RTLIL, CFG/DDG/DFG, and netlist generation |
+| Agentic RAG | `rag/hardware_reference.py` | Reference-document retrieval and answer generation |
+| Long-term memory | `memory/long_term.py` | User profile and durable memory tools |
 | LangGraph Agent Server | `langgraph_server/agent_runtime.py` | Alternative HTTP/CLI agent runtime |
 
 ## Requirements
@@ -122,10 +123,10 @@ The `.env` file is ignored by Git and should not be committed.
 
 | 用途 | 配置项 | 初始化入口 | 表结构 |
 | --- | --- | --- | --- |
-| LangGraph checkpointer | `CHECKPOINTER_BACKEND`, `CHECKPOINTER_DB_URI`, `CHECKPOINTER_AUTO_SETUP` | `chat_app.py::_build_checkpointer()` 创建 `AsyncPostgresSaver`，启动时调用 `checkpointer.setup()` | `checkpoint_migrations`, `checkpoints`, `checkpoint_blobs`, `checkpoint_writes` |
-| Long-term memory store | `MEMORY_STORE_BACKEND`, `MEMORY_STORE_DB_URI`, `MEMORY_STORE_AUTO_SETUP`, `MEMORY_ENABLE_SEMANTIC_SEARCH` | `long_term_memory.py::build_memory_store()` 创建 `AsyncPostgresStore`，启动时调用 `store.setup()` | `store_migrations`, `store`; 启用语义检索时还会创建 `vector_migrations`, `store_vectors` 和 `vector` 扩展 |
-| Chainlit 历史会话数据层 | `DATABASE_URL`, `CHAINLIT_ENABLE_PASSWORD_AUTH`, `CHAINLIT_AUTH_SECRET` | `chat_app.py` 通过 `@cl.data_layer` 注册 `AppChainlitDataLayer`；Python 运行时只连接数据库，不自动执行 Prisma 迁移 | `User`, `Thread`, `Step`, `Element`, `Feedback`, `StepType`，由 `chainlit-datalayer` 的 Prisma migration 创建 |
-| Chainlit 附件对象存储 | `BUCKET_NAME`, `APP_AWS_*`, `DEV_AWS_ENDPOINT`, `LOCAL_MINIO_*` | `chat_app.py::_build_chainlit_storage_client()` 创建 `S3StorageClient`；本地 MinIO 可按环境变量自动启动 | 文件对象存储在 MinIO/S3，PostgreSQL 中只保存 `Element.objectKey` 等元数据 |
+| LangGraph checkpointer | `CHECKPOINTER_BACKEND`, `CHECKPOINTER_DB_URI`, `CHECKPOINTER_AUTO_SETUP` | `agent_runtime/checkpointer.py::build_checkpointer()` 创建 `AsyncPostgresSaver`，启动时调用 `checkpointer.setup()` | `checkpoint_migrations`, `checkpoints`, `checkpoint_blobs`, `checkpoint_writes` |
+| Long-term memory store | `MEMORY_STORE_BACKEND`, `MEMORY_STORE_DB_URI`, `MEMORY_STORE_AUTO_SETUP`, `MEMORY_ENABLE_SEMANTIC_SEARCH` | `memory/long_term.py::build_memory_store()` 创建 `AsyncPostgresStore`，启动时调用 `store.setup()` | `store_migrations`, `store`; 启用语义检索时还会创建 `vector_migrations`, `store_vectors` 和 `vector` 扩展 |
+| Chainlit 历史会话数据层 | `DATABASE_URL`, `CHAINLIT_ENABLE_PASSWORD_AUTH`, `CHAINLIT_AUTH_SECRET` | `app/chainlit_data.py` 通过 `@cl.data_layer` 注册 `AppChainlitDataLayer`；Python 运行时只连接数据库，不自动执行 Prisma 迁移 | `User`, `Thread`, `Step`, `Element`, `Feedback`, `StepType`，由 `chainlit-datalayer` 的 Prisma migration 创建 |
+| Chainlit 附件对象存储 | `BUCKET_NAME`, `APP_AWS_*`, `DEV_AWS_ENDPOINT`, `LOCAL_MINIO_*` | `app/chainlit_data.py::_build_chainlit_storage_client()` 创建 `S3StorageClient`；本地 MinIO 可按环境变量自动启动 | 文件对象存储在 MinIO/S3，PostgreSQL 中只保存 `Element.objectKey` 等元数据 |
 
 LangGraph 的两类表可以在 Chainlit 启动时自动创建；Chainlit 历史会话表必须提前执行 `chainlit-datalayer` 的 Prisma migration；MinIO 只负责附件对象存储，不创建数据库表。
 
@@ -192,14 +193,6 @@ psql "<DATABASE_URL from .env>" -c "\dt"
 
 ## Run the Chainlit App
 
-Option 1: use the helper script:
-
-```powershell
-.\start_chainlit_mcp.cmd
-```
-
-Option 2: run manually:
-
 ```powershell
 cd <project-root>
 conda activate mcp-alint
@@ -207,7 +200,7 @@ chainlit run chat_app.py
 ```
 
 The Chainlit app starts the MCP server automatically through stdio. You do not
-need to start `mcp_lint.py` separately for normal chat usage.
+need to start `python -m mcp_server.server` separately for normal chat usage.
 
 ## Run the LangGraph Agent Server
 
@@ -240,7 +233,7 @@ For details, see `langgraph_server/README.md`.
 
 ## MCP Tools and Resources
 
-`mcp_lint.py` exposes the following main MCP tools:
+`mcp_server/server.py` exposes the following main MCP tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -286,19 +279,46 @@ reports/_prepared/<session_id>/
 
 ```text
 mcp_alint/
-  chat_app.py                         # Chainlit UI and main agent runtime
-  mcp_lint.py                         # FastMCP server
-  AST.py                              # Yosys-based structure analysis backend
-  agentic_rag.py                      # Hardware reference Agentic RAG
-  long_term_memory.py                 # Long-term memory tools and store setup
-  reflection_middleware.py            # Evaluator-optimizer middleware
-  llm_factory.py                      # Shared LLM construction helper
+  chat_app.py                         # Chainlit compatibility entrypoint
+  app/
+    chainlit_data.py                  # Chainlit data layer and object storage setup
+    chainlit_hitl.py                  # Chainlit HITL approval UI helpers
+    chainlit_messages.py              # Chainlit/LangChain message conversion
+    chainlit_runtime.py               # Chainlit agent runtime lifecycle
+    chainlit_streaming.py             # Chainlit streaming/task display helpers
+  mcp_server/
+    eda_backend.py                    # Optional EDA backend imports
+    json_conversion.py                # JSON/CSV conversion helpers
+    pathing.py                        # Workspace path normalization helpers
+    prompts.py                        # MCP prompt registration
+    resources.py                      # MCP resource registration
+    server.py                         # FastMCP server implementation
+    tools/                            # MCP tool registration modules
   config.py                           # Centralized environment configuration
-  utils.py                            # Shared project and path utilities
-  agent/
+  workspace/
+    project_utils.py                  # Shared project and path utilities
+  eda/
+    alint.py                          # ALINT-PRO batch runner
+    ast.py                            # Yosys-based AST/CFG/DDG/netlist backend
+  llm/
+    factory.py                        # Shared LLM construction helper
+  memory/
+    long_term.py                      # Long-term memory tools and store setup
+  rag/
+    hardware_reference.py             # Hardware reference Agentic RAG
+  alint_workflow/
     graph.py                          # LangGraph workflow definition
     state.py                          # Workflow state
     nodes/                            # ALINT/Yosys/source/organize nodes
+  agent_runtime/
+    checkpointer.py                   # LangGraph checkpointer factory
+    configuration.py                  # LLM preset and runtime config helpers
+    middleware.py                     # Shared middleware builders
+    prompts.py                        # Shared agent prompts
+    reflection.py                     # Evaluator-optimizer middleware
+    tools.py                          # Shared MCP/RAG/web/memory tool loading
+  compat/
+    langgraph.py                      # Third-party compatibility patches
   prompts/
     templates.py                      # MCP prompt templates
   langgraph_server/                   # LangGraph Agent Server entrypoint and CLI

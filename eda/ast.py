@@ -5,14 +5,14 @@ Parse Verilog/SystemVerilog (single file or directory) with OSS CAD Suite (Yosys
 
 Usage examples:
   # Single file
-  python AST.py rtl/top.v --print
-  python AST.py rtl/top.v --json ast.json
-  python AST.py rtl/top.v --netlist-verilog synth.v --netlist-json netlist.json --top top
+  python -m eda.ast rtl/top.v --print
+  python -m eda.ast rtl/top.v --json ast.json
+  python -m eda.ast rtl/top.v --netlist-verilog synth.v --netlist-json netlist.json --top top
 
   # Directory (recursively parse all .v/.sv under it)
-  python AST.py ./rtl --print
-  python AST.py ./rtl -I ./include -D WIDTH=32 -D USE_FOO --json ast.json
-  python AST.py ./rtl --netlist-verilog synth.v --netlist-json netlist.json --top top
+  python -m eda.ast ./rtl --print
+  python -m eda.ast ./rtl -I ./include -D WIDTH=32 -D USE_FOO --json ast.json
+  python -m eda.ast ./rtl --netlist-verilog synth.v --netlist-json netlist.json --top top
 """
 
 import argparse

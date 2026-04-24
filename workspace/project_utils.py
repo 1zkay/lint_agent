@@ -1,7 +1,7 @@
 """
 共享工具函数
 
-供 mcp_lint.py 和各节点复用，避免重复代码。
+供 MCP 工具和工作流节点复用，避免重复代码。
 """
 import logging
 import xml.etree.ElementTree as ET
@@ -17,7 +17,7 @@ HDL_EXTS = (".v", ".vh", ".sv", ".svh", ".vhd", ".vhdl", ".adc")
 
 # ── AST 后端可用性检查 ─────────────────────────────────────────────────────────
 try:
-    from AST import infer_incdirs as _infer_incdirs
+    from eda.ast import infer_incdirs as _infer_incdirs
     _AST_AVAILABLE = True
 except ImportError:
     _AST_AVAILABLE = False

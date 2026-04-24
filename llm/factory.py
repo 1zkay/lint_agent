@@ -28,7 +28,7 @@ def build_chat_model_from_config(
     cfg: Any,
     *,
     logger: logging.Logger | None = None,
-    log_prefix: str = "[llm_factory]",
+    log_prefix: str = "[llm.factory]",
 ):
     """Build a LangChain chat model from the shared config object."""
 

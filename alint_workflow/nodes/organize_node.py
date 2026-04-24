@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from agent.state import AlintWorkflowState
+from ..state import AlintWorkflowState
 from config import config
 
 logger = logging.getLogger(__name__)

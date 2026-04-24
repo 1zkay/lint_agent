@@ -42,13 +42,21 @@ server = ["langgraph-cli[inmem]"]
 
 [tool.setuptools]
 py-modules = [
-  "AST",
-  "agentic_rag",
-  "config",
-  "llm_factory",
-  "long_term_memory",
-  "mcp_lint",
-  "reflection_middleware",
-  "utils"
+  "config"
 ]
-packages = ["agent", "agent.nodes", "prompts", "langgraph_server"]
+packages = [
+  "agent_runtime",
+  "alint_workflow",
+  "alint_workflow.nodes",
+  "app",
+  "compat",
+  "eda",
+  "llm",
+  "memory",
+  "prompts",
+  "rag",
+  "langgraph_server",
+  "mcp_server",
+  "mcp_server.tools",
+  "workspace",
+]

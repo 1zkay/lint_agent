@@ -1,7 +1,7 @@
 """
 MCP Prompt 模板定义
 
-将原 mcp_lint.py 中硬编码的 prompt 字符串统一管理。
+将 MCP server 中使用的 prompt 字符串统一管理。
 每个函数返回 FastMCP 标准 PromptMessage 列表。
 """
 

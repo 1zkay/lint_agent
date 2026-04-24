@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import List
 
-from agent.state import AlintWorkflowState
+from ..state import AlintWorkflowState
 
 logger = logging.getLogger(__name__)
 

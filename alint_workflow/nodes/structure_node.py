@@ -1,5 +1,5 @@
 """
-Node 2: 用 Yosys/AST.py 生成 AST、CFG/DDG/DFG
+Node 2: 用 Yosys/eda.ast 生成 AST、CFG/DDG/DFG
 
 对应原 _analyze_verilog_structure_impl()
 """
@@ -9,14 +9,14 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from agent.state import AlintWorkflowState
-from utils import resolve_project_verilog_inputs
+from ..state import AlintWorkflowState
+from workspace.project_utils import resolve_project_verilog_inputs
 
 logger = logging.getLogger(__name__)
 
 # ── Yosys 后端：延迟导入 ────────────────────────────────────────
 try:
-    from AST import (
+    from eda.ast import (
         parse_target,
         node_to_dict,
         _prepare_temp_sources,

@@ -38,7 +38,7 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
-from llm_factory import (
+from llm.factory import (
     build_chat_model_from_config,
     build_openrouter_default_headers,
 )
@@ -127,7 +127,7 @@ class HardwareReferenceAgenticRAGService:
         for raw_item in raw_items:
             path = Path(str(raw_item).strip()).resolve()
             if not path.exists():
-                logger.warning("[agentic_rag] PDF knowledge base not found: %s", path)
+                logger.warning("[hardware_rag] PDF knowledge base not found: %s", path)
                 continue
 
             kb_id_base = self._slugify(path.stem, "kb")
@@ -243,7 +243,7 @@ class HardwareReferenceAgenticRAGService:
             docs = await loader.aload()
         except Exception as exc:
             logger.warning(
-                "[agentic_rag] PyPDFLoader failed for %s, fallback to PyMuPDF/fitz: %s",
+                "[hardware_rag] PyPDFLoader failed for %s, fallback to PyMuPDF/fitz: %s",
                 runtime.spec.path,
                 exc,
             )
@@ -287,7 +287,7 @@ class HardwareReferenceAgenticRAGService:
             if self._index_is_fresh(runtime):
                 try:
                     logger.info(
-                        "[agentic_rag] loading cached vector index for %s from %s",
+                        "[hardware_rag] loading cached vector index for %s from %s",
                         runtime.spec.kb_id,
                         runtime.vectorstore_path,
                     )
@@ -302,20 +302,20 @@ class HardwareReferenceAgenticRAGService:
                     return vectorstore
                 except Exception as exc:
                     logger.warning(
-                        "[agentic_rag] failed to load cached vector index for %s, rebuilding: %s",
+                        "[hardware_rag] failed to load cached vector index for %s, rebuilding: %s",
                         runtime.spec.kb_id,
                         exc,
                     )
 
             logger.info(
-                "[agentic_rag] building vector index for %s from %s",
+                "[hardware_rag] building vector index for %s from %s",
                 runtime.spec.kb_id,
                 runtime.spec.path,
             )
             docs = await self._load_pdf_pages(runtime)
             splits = await asyncio.to_thread(self._split_documents, runtime, docs)
             logger.info(
-                "[agentic_rag] indexing %s pages into %s chunks for %s with model %s",
+                "[hardware_rag] indexing %s pages into %s chunks for %s with model %s",
                 len(docs),
                 len(splits),
                 runtime.spec.kb_id,
@@ -340,7 +340,7 @@ class HardwareReferenceAgenticRAGService:
                 "utf-8",
             )
             self._vectorstores[kb_id] = vectorstore
-            logger.info("[agentic_rag] vector index ready for %s", runtime.spec.kb_id)
+            logger.info("[hardware_rag] vector index ready for %s", runtime.spec.kb_id)
             return vectorstore
 
     async def ensure_vectorstores(self) -> dict[str, FAISS]:
@@ -386,7 +386,7 @@ class HardwareReferenceAgenticRAGService:
         for runtime, scored_docs in zip(runtimes, search_results):
             if isinstance(scored_docs, Exception):
                 logger.warning(
-                    "[agentic_rag] retrieval failed for %s: %s",
+                    "[hardware_rag] retrieval failed for %s: %s",
                     runtime.spec.kb_id,
                     scored_docs,
                 )
@@ -711,13 +711,13 @@ def build_hardware_reference_agentic_rag_tool(cfg: Any):
     """Build the hardware-reference tool exposed to the main Chainlit agent."""
 
     if not cfg.rag_enabled:
-        logger.info("[agentic_rag] disabled by config")
+        logger.info("[hardware_rag] disabled by config")
         return None
     if not cfg.llm_model:
-        logger.warning("[agentic_rag] chat model not configured; RAG tool disabled")
+        logger.warning("[hardware_rag] chat model not configured; RAG tool disabled")
         return None
     if not _embedding_credentials_available(cfg):
-        logger.warning("[agentic_rag] embedding credentials missing; RAG tool disabled")
+        logger.warning("[hardware_rag] embedding credentials missing; RAG tool disabled")
         return None
 
     service = get_hardware_reference_agentic_rag_service(cfg)

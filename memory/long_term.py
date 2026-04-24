@@ -14,7 +14,7 @@ from langchain_openai import OpenAIEmbeddings
 from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel, Field
 
-from llm_factory import build_openrouter_default_headers
+from llm.factory import build_openrouter_default_headers
 
 logger = logging.getLogger(__name__)
 
@@ -334,7 +334,7 @@ async def _resolve_memory_index_config(cfg: Any) -> dict[str, Any] | None:
         raise ValueError("Failed to infer embedding dimensions for long-term memory.")
 
     logger.info(
-        "[long_term_memory] Semantic search enabled for long-term memory "
+        "[memory] Semantic search enabled for long-term memory "
         "(model=%s, dims=%s)",
         cfg.memory_embed_model,
         dims,
@@ -356,12 +356,12 @@ async def build_memory_store(
     index_config = await _resolve_memory_index_config(cfg)
 
     if backend == "memory":
-        logger.info("[long_term_memory] Store: InMemoryStore")
+        logger.info("[memory] Store: InMemoryStore")
         return InMemoryStore(index=index_config)
 
     if backend != "postgres":
         logger.warning(
-            "[long_term_memory] Unsupported MEMORY_STORE_BACKEND=%s, using postgres.",
+            "[memory] Unsupported MEMORY_STORE_BACKEND=%s, using postgres.",
             backend,
         )
 
@@ -379,5 +379,5 @@ async def build_memory_store(
     )
     if cfg.memory_store_auto_setup:
         await store.setup()
-    logger.info("[long_term_memory] Store: AsyncPostgresStore (%s)", db_uri)
+    logger.info("[memory] Store: AsyncPostgresStore (%s)", db_uri)
     return store

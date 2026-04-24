@@ -13,7 +13,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 APP_DIR = SCRIPT_DIR.parent
 sys.path.insert(0, str(APP_DIR))
 
-from agentic_rag import get_hardware_reference_agentic_rag_service
+from rag.hardware_reference import get_hardware_reference_agentic_rag_service
 from config import config
 
 

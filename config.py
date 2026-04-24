@@ -1,7 +1,7 @@
 """
 ALINT-PRO 全局配置（唯一入口）
 
-所有可配置项统一在此管理；其他模块（chat_app / mcp_lint 等）一律通过
+所有可配置项统一在此管理；其他模块（chat_app / mcp_server 等）一律通过
 ``from config import config`` 访问，禁止自行调用 os.getenv。
 
 优先级（由低到高）：类内默认值 → .env 文件 → 系统环境变量
