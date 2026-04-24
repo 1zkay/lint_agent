@@ -7,6 +7,11 @@ The project turns commercial lint output, HDL source code, structural analysis
 artifacts, self-built Verilog rule knowledge, and reference-document retrieval
 into one interactive diagnosis workflow.
 
+The core Chainlit agent can also run without ALINT-PRO, Yosys, or other EDA
+tools. In that mode it works as a general-purpose LLM agent with chat, memory,
+RAG, skills, and approval workflows; only EDA-specific analysis tools are
+unavailable or return graceful failure messages.
+
 ## What This Project Does
 
 - Provides a Chainlit chat UI for Verilog lint diagnosis.
@@ -63,12 +68,15 @@ LangGraph ALINT workflow
 
 Recommended environment:
 
-- Windows, because ALINT-PRO is invoked through a Windows executable.
 - Python 3.12.
 - Conda or another virtual environment manager.
+- LLM API credentials for a LangChain-compatible chat model.
+
+Required only for EDA diagnosis workflows:
+
+- Windows, because ALINT-PRO is invoked through a Windows executable.
 - ALINT-PRO installed and licensed.
 - OSS CAD Suite / Yosys available and configured through `OSS_CAD_SUITE_ROOT`.
-- LLM API credentials for a LangChain-compatible chat model.
 
 Optional components:
 
@@ -105,6 +113,20 @@ pip install -e .
 
 Use `environment.mcp-alint.yml` for the full Chainlit runtime because it also
 includes UI-related dependencies.
+
+## Prebuilt Docker Images
+
+Prebuilt customer Docker images are available from Baidu Netdisk:
+
+```text
+Link: https://pan.baidu.com/s/1t2fzdzzrG1Y0__Bs1svInQ?pwd=uuam
+Extraction code: uuam
+```
+
+These images can run the packaged Chainlit agent without requiring local Python
+dependency installation. ALINT-PRO/Yosys are still optional from the perspective
+of general chat usage; EDA-specific analysis requires the corresponding tools
+and project inputs to be available.
 
 ## Configuration
 
