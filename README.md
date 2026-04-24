@@ -1,5 +1,7 @@
 # ALINT-PRO Verilog Lint EDA Diagnostic Agent
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/1zkay/lint_agent)
+
 `mcp_alint` is a Verilog/SystemVerilog lint diagnosis agent built around
 LangChain, LangGraph, MCP, Chainlit, ALINT-PRO, Yosys, and Agentic RAG.
 
