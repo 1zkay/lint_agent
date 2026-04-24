@@ -280,6 +280,7 @@ class Config:
         self.s3_access_key = os.getenv("APP_AWS_ACCESS_KEY", "").strip()
         self.s3_secret_key = os.getenv("APP_AWS_SECRET_KEY", "").strip()
         self.s3_endpoint_url = os.getenv("DEV_AWS_ENDPOINT", "").strip() or None
+        self.s3_public_endpoint_url = os.getenv("APP_AWS_PUBLIC_ENDPOINT", "").strip() or None
         self.local_minio_auto_start = self._bool_env("LOCAL_MINIO_AUTO_START", "false")
         local_minio_exe = os.getenv("LOCAL_MINIO_EXE", "").strip()
         local_minio_data_dir = os.getenv("LOCAL_MINIO_DATA_DIR", "").strip()

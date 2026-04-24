@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import boto3
+from botocore.config import Config as BotoCoreConfig
 from chainlit.data.chainlit_data_layer import ChainlitDataLayer
+from chainlit.data.storage_clients.s3 import S3StorageClient, storage_expiry_time
 
 from config import config
 
@@ -200,6 +203,64 @@ class AppChainlitDataLayer(ChainlitDataLayer):
         )
 
 
+class AppS3StorageClient(S3StorageClient):
+    """Chainlit S3 client with separate internal and browser-facing endpoints."""
+
+    def __init__(self, bucket: str, public_endpoint_url: str | None = None, **kwargs: Any):
+        self._public_client = None
+        self._public_endpoint_url = (public_endpoint_url or "").strip()
+        super().__init__(bucket=bucket, **kwargs)
+
+        if self._public_endpoint_url:
+            public_kwargs = dict(kwargs)
+            public_kwargs["endpoint_url"] = self._public_endpoint_url
+            try:
+                self._public_client = boto3.client("s3", **public_kwargs)
+            except Exception as exc:
+                logger.warning(
+                    "[chat_app] Failed to initialize public S3 client; using internal endpoint for read URLs: %s",
+                    exc,
+                )
+
+    def sync_get_read_url(self, object_key: str) -> str:
+        client = self._public_client or getattr(self, "client", None)
+        if client is None:
+            return object_key
+
+        try:
+            return client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self.bucket, "Key": object_key},
+                ExpiresIn=storage_expiry_time,
+            )
+        except Exception as exc:
+            logger.warning("[chat_app] S3StorageClient get_read_url error: %s", exc)
+            return object_key
+
+    def sync_upload_file(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = super().sync_upload_file(*args, **kwargs)
+        object_key = str(result.get("object_key") or "").strip() if isinstance(result, dict) else ""
+        if not object_key:
+            return result
+
+        result = dict(result)
+        result["url"] = self.sync_get_read_url(object_key)
+        return result
+
+    async def close(self) -> None:
+        seen_ids: set[int] = set()
+        for client in (self._public_client, getattr(self, "client", None)):
+            if client is None or id(client) in seen_ids:
+                continue
+            seen_ids.add(id(client))
+            close = getattr(client, "close", None)
+            if not callable(close):
+                continue
+            result = close()
+            if hasattr(result, "__await__"):
+                await result
+
+
 def _build_chainlit_storage_client():
     """
     对齐 Chainlit 官方 Data Layer 的 S3 自动装配逻辑：
@@ -212,14 +273,22 @@ def _build_chainlit_storage_client():
     _start_local_minio_if_needed()
 
     try:
-        from chainlit.data.storage_clients.s3 import S3StorageClient
+        client_kwargs: dict[str, Any] = {
+            "region_name": config.s3_region,
+            "aws_access_key_id": config.s3_access_key,
+            "aws_secret_access_key": config.s3_secret_key,
+            "endpoint_url": config.s3_endpoint_url,
+        }
+        if config.s3_endpoint_url:
+            client_kwargs["config"] = BotoCoreConfig(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+            )
 
-        return S3StorageClient(
+        return AppS3StorageClient(
             bucket=config.s3_bucket_name,
-            region_name=config.s3_region,
-            aws_access_key_id=config.s3_access_key,
-            aws_secret_access_key=config.s3_secret_key,
-            endpoint_url=config.s3_endpoint_url,
+            public_endpoint_url=config.s3_public_endpoint_url,
+            **client_kwargs,
         )
     except Exception as exc:
         logger.warning("[chat_app] 初始化 Chainlit S3StorageClient 失败，将不上传附件: %s", exc)
