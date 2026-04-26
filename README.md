@@ -121,7 +121,7 @@ includes UI-related dependencies.
 Prebuilt customer Docker images are available from Baidu Netdisk:
 
 ```text
-[Download from Baidu Netdisk](https://pan.baidu.com/s/1_FT92fLis9CEKJoLQzQUgQ?pwd=f6r8)
+[Download from Baidu Netdisk](https://pan.baidu.com/s/1K_PDZEaptrb7FwTOaQS7QA?pwd=w8h4)
 Extraction code: f6r8
 ```
 
