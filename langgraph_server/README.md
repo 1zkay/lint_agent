@@ -47,13 +47,13 @@ mcp_server/
 PowerShell 或 cmd 中启动：
 
 ```powershell
-D:\mcp\mcp_alint\langgraph_server\start_langgraph_agent_server.cmd
+D:\mcp\lint_agent\langgraph_server\start_langgraph_agent_server.cmd
 ```
 
 等价命令：
 
 ```powershell
-cd D:\mcp\mcp_alint
+cd D:\mcp\lint_agent
 langgraph dev --config langgraph_server\langgraph.json --no-browser --allow-blocking --host 127.0.0.1 --port 2024
 ```
 
@@ -76,8 +76,8 @@ lint
 `langgraph_server/agent_runtime.py` 启动时会做以下事情：
 
 1. 应用 LangGraph 兼容补丁：
-   - `MCP_ALINT_PATCH_LANGGRAPH_SEND=true`
-   - `MCP_ALINT_PATCH_LANGGRAPH_DEV_PERSISTENCE=true`
+   - `LINT_AGENT_PATCH_LANGGRAPH_SEND=true`
+   - `LINT_AGENT_PATCH_LANGGRAPH_DEV_PERSISTENCE=true`
 2. 读取 `.env` 和 `config.py`。
 3. 根据默认 LLM preset 构建 chat model。
 4. 通过 `agent_runtime.tools.load_agent_tools()` 加载：
@@ -116,7 +116,7 @@ LLM、MCP session 和工具会在进程内缓存，避免每个请求重复初�
 Agent Server 启动后，在另一个 PowerShell 终端中调用：
 
 ```powershell
-D:\mcp\mcp_alint\langgraph_server\lint-agent.cmd "分析这个 ALINT 工程"
+D:\mcp\lint_agent\langgraph_server\lint-agent.cmd "分析这个 ALINT 工程"
 ```
 
 如果已经把 `lint-agent` 加入 `PATH`，也可以直接：
@@ -145,7 +145,7 @@ lint-agent --auto-reject "自动拒绝高风险工具调用"
 在 ALINT-PRO console 中先加载 Tcl 包装：
 
 ```tcl
-source D:/mcp/mcp_alint/langgraph_server/lint_agent_alint_console.tcl
+source D:/mcp/lint_agent/langgraph_server/lint_agent_alint_console.tcl
 ```
 
 然后调用：
@@ -193,21 +193,21 @@ lint-agent --auto-reject "..."
 当前默认启用两个补丁：
 
 ```env
-MCP_ALINT_PATCH_LANGGRAPH_SEND=true
-MCP_ALINT_PATCH_LANGGRAPH_DEV_PERSISTENCE=true
+LINT_AGENT_PATCH_LANGGRAPH_SEND=true
+LINT_AGENT_PATCH_LANGGRAPH_DEV_PERSISTENCE=true
 ```
 
 用途：
 
-- `MCP_ALINT_PATCH_LANGGRAPH_SEND`：递归清理 LangGraph `Send` 中嵌套的不可序列化运行时对象，避免 MCP/shell session 对象进入 checkpoint。
-- `MCP_ALINT_PATCH_LANGGRAPH_DEV_PERSISTENCE`：仅用于 `langgraph dev` 本地 `.langgraph_api` 落盘时，清理不可 pickle 对象，避免 Windows + MCP stdio 下出现 `TextIOWrapper` pickle 异常。
+- `LINT_AGENT_PATCH_LANGGRAPH_SEND`：递归清理 LangGraph `Send` 中嵌套的不可序列化运行时对象，避免 MCP/shell session 对象进入 checkpoint。
+- `LINT_AGENT_PATCH_LANGGRAPH_DEV_PERSISTENCE`：仅用于 `langgraph dev` 本地 `.langgraph_api` 落盘时，清理不可 pickle 对象，避免 Windows + MCP stdio 下出现 `TextIOWrapper` pickle 异常。
 
 如果未来升级 LangGraph 后官方已经修复，可以临时关闭验证：
 
 ```powershell
-$env:MCP_ALINT_PATCH_LANGGRAPH_DEV_PERSISTENCE = "false"
-$env:MCP_ALINT_PATCH_LANGGRAPH_SEND = "false"
-D:\mcp\mcp_alint\langgraph_server\start_langgraph_agent_server.cmd
+$env:LINT_AGENT_PATCH_LANGGRAPH_DEV_PERSISTENCE = "false"
+$env:LINT_AGENT_PATCH_LANGGRAPH_SEND = "false"
+D:\mcp\lint_agent\langgraph_server\start_langgraph_agent_server.cmd
 ```
 
 ## 常见问题
@@ -235,7 +235,7 @@ Slow graph load. Accessing graph 'lint' took ...
 如果 MCP 工具加载失败，单独验证：
 
 ```powershell
-cd D:\mcp\mcp_alint
+cd D:\mcp\lint_agent
 python -m mcp_server.server
 ```
 

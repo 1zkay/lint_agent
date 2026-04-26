@@ -30,11 +30,11 @@ def resolve_paths() -> tuple[Path, Path, Path]:
     script_path = Path(__file__).resolve()
     scripts_dir = script_path.parent
     skill_dir = scripts_dir.parent
-    mcp_alint_root = skill_dir.parent.parent
+    project_root = skill_dir.parent.parent
     tool = scripts_dir / "vendor" / "trace_removed_path.py"
     if not tool.exists():
         raise SystemExit(f"missing detector script: {tool}")
-    return skill_dir, mcp_alint_root, tool
+    return skill_dir, project_root, tool
 
 
 def build_output_dir(report_root: Path) -> Path:
@@ -90,14 +90,14 @@ def build_diagnosis_bundle(
 def main() -> int:
     configure_stdio_utf8()
     parser = argparse.ArgumentParser(
-        description="run hierarchical constant-propagation trace and write results under mcp_alint/reports"
+        description="run hierarchical constant-propagation trace and write results under the project reports directory"
     )
     parser.add_argument("inputs", nargs="+", help="source files or source directories")
     parser.add_argument("--top", required=True, help="top module name")
     args = parser.parse_args()
 
-    skill_dir, mcp_alint_root, tool = resolve_paths()
-    report_root = mcp_alint_root / "reports"
+    skill_dir, project_root, tool = resolve_paths()
+    report_root = project_root / "reports"
     output_dir = build_output_dir(report_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "trace_removed_path_report.json"

@@ -30,13 +30,13 @@ Yosys may eliminate unreachable branches during Verilog elaboration or process l
 
 ### 1. Generate evidence files
 
-Run from any working directory:
+Run from the `lint_agent` project root:
 
 ```powershell
-python <mcp_alint>/skills/verilog-dead-code-root-cause/scripts/run_dead_code_trace.py --top <top_module> <source_or_dir> [more_sources...]
+python skills/verilog-dead-code-root-cause/scripts/run_dead_code_trace.py --top <top_module> <source_or_dir> [more_sources...]
 ```
 
-The script writes a new directory under `<mcp_alint>/reports/dead_code_<YYYYMMDD_HHMMSS>/` containing:
+The script writes a new directory under `reports/dead_code_<YYYYMMDD_HHMMSS>/` relative to the project root containing:
 
 - `dead_code_artifacts.json`
 - `pre_proc.il`
@@ -80,4 +80,3 @@ For each finding, report:
 - What remains in `raw_proc.il`.
 - What `opt_proc.il` removes later, if relevant.
 - Whether the root is source-level dead code or only post-`proc` cleanup.
-

@@ -38,16 +38,26 @@ REPO_ROOT = PROJECT_ROOT.parent
 _RUNTIME_COMPONENTS_LOCK: asyncio.Lock | None = None
 _RUNTIME_COMPONENTS: dict[str, Any] | None = None
 
-def _bool_env(key: str, default: bool) -> bool:
+def _bool_env(key: str, default: bool, *, legacy_key: str | None = None) -> bool:
     raw = os.getenv(key)
+    if raw is None and legacy_key is not None:
+        raw = os.getenv(legacy_key)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-if _bool_env("MCP_ALINT_PATCH_LANGGRAPH_DEV_PERSISTENCE", True):
+if _bool_env(
+    "LINT_AGENT_PATCH_LANGGRAPH_DEV_PERSISTENCE",
+    True,
+    legacy_key="MCP_ALINT_PATCH_LANGGRAPH_DEV_PERSISTENCE",
+):
     apply_dev_persistence_pickle_sanitization(log_prefix="[agent_runtime]")
-if _bool_env("MCP_ALINT_PATCH_LANGGRAPH_SEND", True):
+if _bool_env(
+    "LINT_AGENT_PATCH_LANGGRAPH_SEND",
+    True,
+    legacy_key="MCP_ALINT_PATCH_LANGGRAPH_SEND",
+):
     apply_recursive_send_sanitization(
         log_prefix="[agent_runtime]",
         drop_unpickleable=True,

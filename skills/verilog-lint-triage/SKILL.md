@@ -2,7 +2,7 @@
 name: verilog-lint-triage
 description: Use this skill when the user provides Verilog/SystemVerilog source files and a lint report, and wants the lint rows first pre-grouped by same source line and same violation description, then triaged into severe defect, general defect, or false positive, plus missed-defect discovery mapped to rules in the built-in custom knowledge base under skills/verilog-lint-triage/references, while batching IEEE standard lookups by semantic topic instead of per lint row and using the built-in Vivado synthesis document when the issue depends on synthesis behavior or tool guidance, plus a separate standards-based code-only diagnosis section grounded in IEEE and/or Vivado built-in references, with the final result written to a timestamped JSON file.
 license: MIT
-compatibility: Assumes the agent shell runs with the mcp_alint directory as its working directory and can access the input HDL files, the lint report, and the self-built knowledge base directory at skills/verilog-lint-triage/references.
+compatibility: Assumes the agent shell runs with the lint_agent project root as its working directory and can access the input HDL files, the lint report, and the self-built knowledge base directory at skills/verilog-lint-triage/references.
 metadata:
   author: zk
   version: "1.3"

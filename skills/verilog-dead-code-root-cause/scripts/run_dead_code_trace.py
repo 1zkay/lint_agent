@@ -32,8 +32,8 @@ def safe_print(text: str, *, err: bool = False) -> None:
 def resolve_paths() -> tuple[Path, Path]:
     script_path = Path(__file__).resolve()
     skill_dir = script_path.parent.parent
-    mcp_alint_root = skill_dir.parent.parent
-    return skill_dir, mcp_alint_root
+    project_root = skill_dir.parent.parent
+    return skill_dir, project_root
 
 
 def build_output_dir(report_root: Path) -> Path:
@@ -222,13 +222,13 @@ def main() -> int:
     parser.add_argument("--yosys", default=None, help="optional Yosys executable path")
     args = parser.parse_args()
 
-    skill_dir, mcp_alint_root = resolve_paths()
-    report_root = mcp_alint_root / "reports"
+    skill_dir, project_root = resolve_paths()
+    report_root = project_root / "reports"
     output_dir = build_output_dir(report_root)
 
     try:
         files = collect_design_files(args.inputs)
-        yosys_bin = find_yosys(args.yosys, [Path.cwd(), skill_dir, mcp_alint_root])
+        yosys_bin = find_yosys(args.yosys, [Path.cwd(), skill_dir, project_root])
         base = read_cmd(files) + f"hierarchy -check -top {args.top}; "
 
         pre_proc = output_dir / "pre_proc.il"

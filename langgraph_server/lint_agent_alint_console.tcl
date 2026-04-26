@@ -1,7 +1,7 @@
 # Register a non-blocking lint-agent command for the ALINT-PRO Tcl console.
 #
 # Load once in ALINT-PRO console:
-#   source D:/mcp/mcp_alint/langgraph_server/lint_agent_alint_console.tcl
+#   source D:/mcp/lint_agent/langgraph_server/lint_agent_alint_console.tcl
 #
 # Then call:
 #   lint-agent "prompt"
@@ -13,7 +13,7 @@
 
 namespace eval ::LintAgent {
     variable python "D:/software/Miniconda3/envs/mcp/python.exe"
-    variable cli "D:/mcp/mcp_alint/langgraph_server/lint_agent_cli.py"
+    variable cli "D:/mcp/lint_agent/langgraph_server/lint_agent_cli.py"
     variable url "http://127.0.0.1:2024"
     variable job_counter 0
     variable jobs

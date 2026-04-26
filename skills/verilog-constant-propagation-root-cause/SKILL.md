@@ -27,14 +27,14 @@ metadata:
 
 ### 1. Run the detector
 
-- Run directly from the `mcp_alint` working directory:
+- Run directly from the `lint_agent` project root:
 
 ```powershell
 python skills/verilog-constant-propagation-root-cause/scripts/run_constant_trace.py --top <top_module> <source_or_dir> [more_sources...]
 ```
 
 - Do not guess the report path. Read the wrapper output and use the reported output directory and report path.
-- The wrapper always writes results under `<mcp_alint>/reports/constant_propagation_<YYYYMMDD_HHMMSS>/`.
+- The wrapper always writes results under `reports/constant_propagation_<YYYYMMDD_HHMMSS>/` relative to the project root.
 - The detector writes:
   - `trace_removed_path_report.json`
   - `diagnosis_bundle.json`

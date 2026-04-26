@@ -80,7 +80,7 @@ def apply_dev_persistence_pickle_sanitization(*, log_prefix: str) -> None:
     try:
         from langgraph.checkpoint.memory import PersistentDict
 
-        if getattr(PersistentDict, "_mcp_alint_safe_dump", False):
+        if getattr(PersistentDict, "_lint_agent_safe_dump", False):
             return
 
         original_dump = PersistentDict.dump
@@ -137,7 +137,7 @@ def apply_dev_persistence_pickle_sanitization(*, log_prefix: str) -> None:
             original_dump(self, fileobj)
 
         PersistentDict.dump = _patched_dump
-        PersistentDict._mcp_alint_safe_dump = True
+        PersistentDict._lint_agent_safe_dump = True
         logger.info("%s Applied LangGraph dev persistence pickle sanitization patch.", log_prefix)
     except Exception as exc:
         logger.warning("%s Dev persistence pickle sanitization patch failed: %s", log_prefix, exc)
