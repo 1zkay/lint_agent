@@ -1,4 +1,4 @@
-name: lint-agen
+name: lint-agent
 channels:
   - conda-forge
 dependencies:
