@@ -1,4 +1,4 @@
-name: mcp-alint
+name: lint-agent
 channels:
   - conda-forge
 dependencies:

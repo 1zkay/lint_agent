@@ -1,15 +1,15 @@
-# ALINT-PRO Verilog Lint EDA Diagnostic Agent
+# Verilog Lint EDA Diagnostic Agent
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/1zkay/lint_agent)
 
-`mcp_alint` is a Verilog/SystemVerilog lint diagnosis agent built around
-LangChain, LangGraph, MCP, Chainlit, ALINT-PRO, Yosys, and Agentic RAG.
+`lint_agent` is a Verilog/SystemVerilog lint tool diagnosis agent built around
+LangChain, LangGraph, MCP, Chainlit, Yosys, and Agentic RAG.
 
-The project turns commercial lint output, HDL source code, structural analysis
+The project turns lint tool output, HDL source code, structural analysis
 artifacts, self-built Verilog rule knowledge, and reference-document retrieval
 into one interactive diagnosis workflow.
 
-The core Chainlit agent can also run without ALINT-PRO, Yosys, or other EDA
+The core Chainlit agent can also run without the external lint tool, Yosys, or other EDA
 tools. In that mode it works as a general-purpose LLM agent with chat, memory,
 RAG, skills, and approval workflows; only EDA-specific analysis tools are
 unavailable or return graceful failure messages.
@@ -18,9 +18,9 @@ unavailable or return graceful failure messages.
 
 - Provides a Chainlit chat UI for Verilog lint diagnosis.
 - Uses LangChain `create_agent` as the main agent runtime.
-- Uses MCP to expose ALINT-PRO, Yosys, resources, and prompts as standard tools.
+- Uses MCP to expose the lint tool, Yosys, resources, and prompts as standard tools.
 - Uses LangGraph `StateGraph` for deterministic EDA preprocessing workflows.
-- Uses ALINT-PRO to generate lint violation CSV reports.
+- Uses the lint tool to generate lint violation CSV reports.
 - Uses Yosys / OSS CAD Suite to generate AST, RTLIL, CFG, DDG, DFG, and netlist artifacts.
 - Uses Agentic RAG over hardware reference PDFs such as IEEE and Vivado documents.
 - Supports long-term memory, task planning, human-in-the-loop tool approval, and skill-based diagnosis workflows.
@@ -46,8 +46,8 @@ FastMCP Server: python -m mcp_server.server
   |-- MCP prompts
   |
   v
-LangGraph ALINT workflow
-  |-- lint_node       -> ALINT-PRO CSV report
+LangGraph lint tool workflow
+  |-- lint_node       -> lint tool CSV report
   |-- structure_node  -> Yosys AST / RTLIL / CFG / DDG / DFG
   |-- sources_node    -> source code with line numbers
   |-- organize_node   -> reports/_prepared/<session_id>/
@@ -60,7 +60,7 @@ LangGraph ALINT workflow
 | Chainlit app | `chat_app.py` | Chainlit compatibility entrypoint and message streaming handler |
 | MCP server | `mcp_server/server.py` | FastMCP server assembly |
 | MCP implementation | `mcp_server/` | Exposes EDA tools, resources, and prompts |
-| LangGraph workflow | `alint_workflow/graph.py` | Deterministic ALINT analysis pipeline |
+| LangGraph workflow | workflow graph | Deterministic lint tool analysis pipeline |
 | Yosys backend | `eda/ast.py` | AST, RTLIL, CFG/DDG/DFG, and netlist generation |
 | Agentic RAG | `rag/hardware_reference.py` | Reference-document retrieval and answer generation |
 | Long-term memory | `memory/long_term.py` | User profile and durable memory tools |
@@ -76,8 +76,8 @@ Recommended environment:
 
 Required only for EDA diagnosis workflows:
 
-- Windows, because ALINT-PRO is invoked through a Windows executable.
-- ALINT-PRO installed and licensed.
+- Windows, when the configured lint tool is invoked through a Windows executable.
+- A supported lint tool installed and licensed.
 - OSS CAD Suite / Yosys available and configured through `OSS_CAD_SUITE_ROOT`.
 
 Optional components:
@@ -99,8 +99,8 @@ cd <project-root>
 Create the Conda environment from the provided file:
 
 ```powershell
-conda env create -f environment.mcp-alint.yml
-conda activate mcp-alint
+conda env create -f environment.lint-agent.yml
+conda activate lint-agent
 ```
 
 The existing Windows helper scripts in this repository currently activate a
@@ -113,7 +113,7 @@ For editable Python package usage:
 pip install -e .
 ```
 
-Use `environment.mcp-alint.yml` for the full Chainlit runtime because it also
+Use `environment.lint-agent.yml` for the full Chainlit runtime because it also
 includes UI-related dependencies.
 
 ## Prebuilt Docker Images
@@ -126,7 +126,7 @@ Extraction code: uuam
 ```
 
 These images can run the packaged Chainlit agent without requiring local Python
-dependency installation. ALINT-PRO/Yosys are still optional from the perspective
+dependency installation. The lint tool and Yosys are still optional from the perspective
 of general chat usage; EDA-specific analysis requires the corresponding tools
 and project inputs to be available.
 
@@ -143,18 +143,18 @@ The `.env` file is ignored by Git and should not be committed.
 
 ## Windows Service Initialization
 
-本项目的持久化初始化分为四类：
+Persistence initialization in this project has four parts:
 
-| 用途 | 配置项 | 初始化入口 | 表结构 |
+| Purpose | Configuration | Initialization entry point | Tables |
 | --- | --- | --- | --- |
-| LangGraph checkpointer | `CHECKPOINTER_BACKEND`, `CHECKPOINTER_DB_URI`, `CHECKPOINTER_AUTO_SETUP` | `agent_runtime/checkpointer.py::build_checkpointer()` 创建 `AsyncPostgresSaver`，启动时调用 `checkpointer.setup()` | `checkpoint_migrations`, `checkpoints`, `checkpoint_blobs`, `checkpoint_writes` |
-| Long-term memory store | `MEMORY_STORE_BACKEND`, `MEMORY_STORE_DB_URI`, `MEMORY_STORE_AUTO_SETUP`, `MEMORY_ENABLE_SEMANTIC_SEARCH` | `memory/long_term.py::build_memory_store()` 创建 `AsyncPostgresStore`，启动时调用 `store.setup()` | `store_migrations`, `store`; 启用语义检索时还会创建 `vector_migrations`, `store_vectors` 和 `vector` 扩展 |
-| Chainlit 历史会话数据层 | `DATABASE_URL`, `CHAINLIT_ENABLE_PASSWORD_AUTH`, `CHAINLIT_AUTH_SECRET` | `app/chainlit_data.py` 通过 `@cl.data_layer` 注册 `AppChainlitDataLayer`；Python 运行时只连接数据库，不自动执行 Prisma 迁移 | `User`, `Thread`, `Step`, `Element`, `Feedback`, `StepType`，由 `chainlit-datalayer` 的 Prisma migration 创建 |
-| Chainlit 附件对象存储 | `BUCKET_NAME`, `APP_AWS_*`, `DEV_AWS_ENDPOINT`, `LOCAL_MINIO_*` | `app/chainlit_data.py::_build_chainlit_storage_client()` 创建 `S3StorageClient`；本地 MinIO 可按环境变量自动启动 | 文件对象存储在 MinIO/S3，PostgreSQL 中只保存 `Element.objectKey` 等元数据 |
+| LangGraph checkpointer | `CHECKPOINTER_BACKEND`, `CHECKPOINTER_DB_URI`, `CHECKPOINTER_AUTO_SETUP` | `agent_runtime/checkpointer.py::build_checkpointer()` creates `AsyncPostgresSaver` and calls `checkpointer.setup()` at startup | `checkpoint_migrations`, `checkpoints`, `checkpoint_blobs`, `checkpoint_writes` |
+| Long-term memory store | `MEMORY_STORE_BACKEND`, `MEMORY_STORE_DB_URI`, `MEMORY_STORE_AUTO_SETUP`, `MEMORY_ENABLE_SEMANTIC_SEARCH` | `memory/long_term.py::build_memory_store()` creates `AsyncPostgresStore` and calls `store.setup()` at startup | `store_migrations`, `store`; when semantic search is enabled, it also creates `vector_migrations`, `store_vectors`, and the `vector` extension |
+| Chainlit thread history data layer | `DATABASE_URL`, `CHAINLIT_ENABLE_PASSWORD_AUTH`, `CHAINLIT_AUTH_SECRET` | `app/chainlit_data.py` registers `AppChainlitDataLayer` through `@cl.data_layer`; the Python runtime only connects to the database and does not run Prisma migrations automatically | `User`, `Thread`, `Step`, `Element`, `Feedback`, `StepType`, created by the Prisma migrations in `chainlit-datalayer` |
+| Chainlit attachment object storage | `BUCKET_NAME`, `APP_AWS_*`, `DEV_AWS_ENDPOINT`, `LOCAL_MINIO_*` | `app/chainlit_data.py::_build_chainlit_storage_client()` creates `S3StorageClient`; local MinIO can be started automatically from environment variables | File objects are stored in MinIO/S3; PostgreSQL stores only metadata such as `Element.objectKey` |
 
-LangGraph 的两类表可以在 Chainlit 启动时自动创建；Chainlit 历史会话表必须提前执行 `chainlit-datalayer` 的 Prisma migration；MinIO 只负责附件对象存储，不创建数据库表。
+The two LangGraph table groups can be created automatically when Chainlit starts. Chainlit thread history tables must be created ahead of time by running the `chainlit-datalayer` Prisma migrations. MinIO only stores attachment objects and does not create database tables.
 
-Windows 本地服务初始化脚本：
+Windows local service initialization script:
 
 ```powershell
 cd <project-root>
@@ -167,18 +167,18 @@ if (!(Test-Path .env)) { Copy-Item .env.example .env }
   -AppPassword "<app-password>"
 ```
 
-脚本会执行以下操作：
+The script performs these steps:
 
-- 使用 `psql` 连接本机 PostgreSQL，创建或更新应用用户。
-- 创建或修正 `langgraph_db` 和 `chainlit_db` 的 owner。
-- 在 `chainlit_db` 中准备 `pgcrypto`。
-- 按 pgvector 官方 Windows 流程构建安装 pgvector：设置 `PGROOT`，执行 `nmake /F Makefile.win` 和 `nmake /F Makefile.win install`，再在 `langgraph_db` 中创建 `vector` 扩展。
-- 找到或克隆同级 `chainlit-datalayer`，安装 Node 依赖并运行 `npx prisma migrate deploy`。
-- 下载本地 MinIO 到项目内 `.local/minio/bin`，数据目录为 `.local/minio/data`。
-- 启动 MinIO，创建 `BUCKET_NAME` 对应 bucket。
-- 不修改 `.env`；脚本参数和 `.env` 需要按 `.env.example` 保持一致。
+- Connects to the local PostgreSQL instance with `psql` and creates or updates the application user.
+- Creates or fixes the owner of `langgraph_db` and `chainlit_db`.
+- Prepares `pgcrypto` in `chainlit_db`.
+- Builds and installs pgvector using the official Windows flow: sets `PGROOT`, runs `nmake /F Makefile.win` and `nmake /F Makefile.win install`, then creates the `vector` extension in `langgraph_db`.
+- Finds or clones the sibling `chainlit-datalayer` repository, installs Node dependencies, and runs `npx prisma migrate deploy`.
+- Downloads local MinIO into `.local/minio/bin` in this project; the data directory is `.local/minio/data`.
+- Starts MinIO and creates the bucket named by `BUCKET_NAME`.
+- Does not modify `.env`; script parameters and `.env` values should stay consistent with `.env.example`.
 
-如果 `psql.exe` 不在 `PATH`，通过参数显式指定：
+If `psql.exe` is not in `PATH`, pass it explicitly:
 
 ```powershell
 .\scripts\init_services_windows.ps1 `
@@ -186,12 +186,12 @@ if (!(Test-Path .env)) { Copy-Item .env.example .env }
   -SuperUser postgres `
   -SuperPassword "<postgres-admin-password>" `
   -AppUser postgres `
-  -AppPassword "<应用账号密码>"
+  -AppPassword "<app-password>"
 ```
 
-如果 PostgreSQL 尚未安装 pgvector，请按 [pgvector 官方 Windows 安装说明](https://github.com/pgvector/pgvector#windows) 准备 Visual Studio C++ 构建工具，并以管理员身份在 Visual Studio x64 Native Tools 环境中运行该脚本，或确保 `nmake`/`cl` 已在 `PATH` 中。脚本默认把 pgvector 源码克隆到 `.local/pgvector/<version>`，安装目标由 `psql.exe` 推导出的 PostgreSQL 根目录决定；也可用 `-PgRoot`、`-PgVectorSourceDir` 和 `-PgVectorVersion` 覆盖。
+If PostgreSQL does not have pgvector installed, follow the [official pgvector Windows installation instructions](https://github.com/pgvector/pgvector#windows) to prepare the Visual Studio C++ build tools. Run this script as an administrator from the Visual Studio x64 Native Tools environment, or ensure that `nmake` and `cl` are already in `PATH`. By default, the script clones the pgvector source into `.local/pgvector/<version>`, and the installation target is inferred from the PostgreSQL root directory associated with `psql.exe`. You can override this with `-PgRoot`, `-PgVectorSourceDir`, and `-PgVectorVersion`.
 
-手动执行 Chainlit 数据层迁移的等价命令：
+Equivalent command for running the Chainlit data layer migration manually:
 
 ```powershell
 cd ..\chainlit-datalayer
@@ -200,26 +200,26 @@ $env:DATABASE_URL = "<DATABASE_URL from .env>"
 npx prisma migrate deploy
 ```
 
-初始化后检查表：
+Check tables after initialization:
 
 ```powershell
 psql "<CHECKPOINTER_DB_URI from .env>" -c "\dt"
 psql "<DATABASE_URL from .env>" -c "\dt"
 ```
 
-注意事项：
+Notes:
 
-- PostgreSQL 需要先在 Windows 上安装并启动服务，`psql.exe` 可通过 `PATH` 或脚本参数提供。
-- Chainlit 历史会话列表和恢复入口需要同时启用认证与数据层。
-- `MEMORY_ENABLE_SEMANTIC_SEARCH=true` 时需要 PostgreSQL 安装 `pgvector` 扩展，并且嵌入模型配置可用。
-- 如果 `CHECKPOINTER_DB_URI` 为空或依赖不可用，`chat_app.py` 会回退到 `InMemorySaver`，聊天状态不会持久化。
-- 如果 `DATABASE_URL` 为空，Chainlit 数据层不会注册，网页历史会话和线程恢复不可用。
+- PostgreSQL must be installed and running as a Windows service first; `psql.exe` can be provided through `PATH` or a script parameter.
+- Chainlit thread history and thread resume require both authentication and the data layer to be enabled.
+- `MEMORY_ENABLE_SEMANTIC_SEARCH=true` requires the PostgreSQL `pgvector` extension and a working embedding model configuration.
+- If `CHECKPOINTER_DB_URI` is empty or dependencies are unavailable, `chat_app.py` falls back to `InMemorySaver`, and chat state will not be persisted.
+- If `DATABASE_URL` is empty, the Chainlit data layer is not registered, and web thread history and thread resume are unavailable.
 
 ## Run the Chainlit App
 
 ```powershell
 cd <project-root>
-conda activate mcp-alint
+conda activate lint-agent
 chainlit run chat_app.py
 ```
 
@@ -250,7 +250,7 @@ lint
 CLI call after the server is running:
 
 ```powershell
-.\langgraph_server\lint-agent.cmd "你是谁"
+.\langgraph_server\lint-agent.cmd "Who are you?"
 ```
 
 For details, see `langgraph_server/README.md`.
@@ -261,8 +261,8 @@ For details, see `langgraph_server/README.md`.
 
 | Tool | Purpose |
 | --- | --- |
-| `generate_basic_analysis_workflow` | Run the full ALINT + Yosys + source extraction + artifact organization workflow |
-| `run_alint_analysis` | Run ALINT-PRO only and generate a CSV report |
+| `generate_basic_analysis_workflow` | Run the full lint tool + Yosys + source extraction + artifact organization workflow |
+| lint analysis tool | Run the lint tool only and generate a CSV report |
 | `analyze_verilog_structure` | Run Yosys structure analysis only |
 | `export_verilog_netlist` | Export synthesized Verilog and JSON netlists |
 | `convert_copilot_json_to_csv` | Convert JSON diagnosis output to CSV |
@@ -272,16 +272,16 @@ It also exposes these read-only resources after a workflow run:
 
 | URI | Content |
 | --- | --- |
-| `alint://basic/sources` | Source code with line numbers |
-| `alint://basic/violations` | ALINT violation CSV |
-| `alint://basic/ast` | AST JSON |
-| `alint://basic/cfg_ddg_dfg` | CFG/DDG/DFG JSON |
-| `alint://basic/kb` | Self-built Verilog knowledge base |
+| `lint-tool://basic/sources` | Source code with line numbers |
+| `lint-tool://basic/violations` | lint tool violation CSV |
+| `lint-tool://basic/ast` | AST JSON |
+| `lint-tool://basic/cfg_ddg_dfg` | CFG/DDG/DFG JSON |
+| `lint-tool://basic/kb` | Self-built Verilog knowledge base |
 
 ## Typical Diagnosis Flow
 
 1. Start the Chainlit app.
-2. Ask the agent to analyze an ALINT workspace and project.
+2. Ask the agent to analyze a lint tool workspace and project.
 3. The agent calls `generate_basic_analysis_workflow`.
 4. The workflow writes standardized artifacts to:
 
@@ -291,7 +291,7 @@ reports/_prepared/<session_id>/
 
 5. The agent reads MCP resources and combines:
 
-- ALINT violation report
+- lint tool violation report
 - Verilog source code
 - AST / CFG / DDG / DFG structure
 - self-built Verilog rule knowledge
@@ -302,7 +302,7 @@ reports/_prepared/<session_id>/
 ## Project Structure
 
 ```text
-mcp_alint/
+lint_agent/
   chat_app.py                         # Chainlit compatibility entrypoint
   app/
     chainlit_data.py                  # Chainlit data layer and object storage setup
@@ -322,7 +322,7 @@ mcp_alint/
   workspace/
     project_utils.py                  # Shared project and path utilities
   eda/
-    alint.py                          # ALINT-PRO batch runner
+    lint_tool.py                      # lint tool batch runner
     ast.py                            # Yosys-based AST/CFG/DDG/netlist backend
   llm/
     factory.py                        # Shared LLM construction helper
@@ -330,10 +330,10 @@ mcp_alint/
     long_term.py                      # Long-term memory tools and store setup
   rag/
     hardware_reference.py             # Hardware reference Agentic RAG
-  alint_workflow/
+  lint_tool_workflow/
     graph.py                          # LangGraph workflow definition
     state.py                          # Workflow state
-    nodes/                            # ALINT/Yosys/source/organize nodes
+    nodes/                            # lint tool / Yosys / source / organize nodes
   agent_runtime/
     checkpointer.py                   # LangGraph checkpointer factory
     configuration.py                  # LLM preset and runtime config helpers
@@ -394,12 +394,12 @@ LLM_BASE_URL
 LLM_API_KEY
 ```
 
-If ALINT analysis fails, check:
+If lint tool analysis fails, check:
 
 - The machine is Windows.
-- `ALINT_EXE` points to `alintcon.exe`.
-- The ALINT license is available.
-- The `.alintws` workspace path and project name are correct.
+- `LINT_TOOL_EXE` points to the lint tool executable.
+- The lint tool license is available.
+- The lint tool workspace path and project name are correct.
 
 If Yosys analysis fails, check:
 
