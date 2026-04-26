@@ -65,7 +65,7 @@ async def run_organize_node(state: AlintWorkflowState) -> dict:
         logger.info(f"[organize_node] CFG/DDG → {prepared_cfg}")
 
     # 5. 复制知识库
-    kb_src = Path(config.alint_pro_root) / "verilog_guidelines_kb_en_completed.jsonl"
+    kb_src = Path(config.alint_pro_root) / "verilog_guidelines_kb_en.jsonl"
     if kb_src.exists():
         shutil.copy2(kb_src, prepared_kb)
         logger.info(f"[organize_node] KB → {prepared_kb}")
