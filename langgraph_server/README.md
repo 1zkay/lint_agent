@@ -6,7 +6,7 @@
 
 - 在 LangGraph Agent Server 上用标准 HTTP API 运行 `lint` graph。
 - 在 PowerShell/cmd 中用 `lint-agent` 进行一次性提问或交互式持久对话。
-- 在 ALINT-PRO Tcl console 中通过非阻塞包装调用同一个 Agent Server。
+- 在 ALINT-PRO Tcl console 中通过 socket 轮询包装调用同一个 Agent Server。
 
 ## 当前实现
 
@@ -27,7 +27,7 @@ langgraph_server/
   langgraph.json                    # LangGraph Server 配置
   lint_agent_cli.py                 # CLI 客户端，调用 Agent Server
   lint-agent.cmd                    # Windows 命令入口
-  lint_agent_alint_console.tcl      # ALINT-PRO Tcl console 非阻塞包装
+  lint_agent_alint_console.tcl      # ALINT-PRO Tcl console socket 轮询包装
   start_langgraph_agent_server.cmd  # 本地启动脚本
 ```
 
@@ -391,7 +391,7 @@ lint-agent> /thread
 lint-agent> /exit
 ```
 
-带 prompt 的 `lint-agent "..."` 使用 Tcl socket 非阻塞轮询调用 `http://127.0.0.1:2024`。它会先打印本轮请求，再等待本轮回答完成后返回；实现上不启动后台任务，这样可以保证同一条 thread 的消息顺序。
+带 prompt 的 `lint-agent "..."` 使用 Tcl socket 非阻塞轮询调用 `http://127.0.0.1:2024`。它会先打印本轮请求，再等待本轮回答完成后返回；实现上不会并发执行请求，这样可以保证同一条 thread 的消息顺序。
 
 裸 `lint-agent` 的每一轮对话也使用同一套 socket 轮询逻辑。用户输入会先立即显示为 `user: ...`，智能体回答显示为 `assistant: ...`；下一轮输入会等当前回答结束后再出现提示符。
 
