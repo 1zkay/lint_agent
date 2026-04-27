@@ -95,34 +95,34 @@ def apply_dev_persistence_pickle_sanitization(*, log_prefix: str) -> None:
 
             if isinstance(obj, dict):
                 seen.add(obj_id)
-                cleaned: dict[Any, Any] = {}
+                cleaned_dict: dict[Any, Any] = {}
                 for key, value in obj.items():
                     safe_key = _safe_for_pickle(key, seen)
                     try:
                         hash(safe_key)
                     except Exception:
                         safe_key = repr(safe_key)
-                    cleaned[safe_key] = _safe_for_pickle(value, seen)
+                    cleaned_dict[safe_key] = _safe_for_pickle(value, seen)
                 seen.discard(obj_id)
-                return cleaned
+                return cleaned_dict
 
             if isinstance(obj, list):
                 seen.add(obj_id)
-                cleaned = [_safe_for_pickle(item, seen) for item in obj]
+                cleaned_list = [_safe_for_pickle(item, seen) for item in obj]
                 seen.discard(obj_id)
-                return cleaned
+                return cleaned_list
 
             if isinstance(obj, tuple):
                 seen.add(obj_id)
-                cleaned = tuple(_safe_for_pickle(item, seen) for item in obj)
+                cleaned_tuple = tuple(_safe_for_pickle(item, seen) for item in obj)
                 seen.discard(obj_id)
-                return cleaned
+                return cleaned_tuple
 
             if isinstance(obj, set):
                 seen.add(obj_id)
-                cleaned = [_safe_for_pickle(item, seen) for item in obj]
+                cleaned_set = [_safe_for_pickle(item, seen) for item in obj]
                 seen.discard(obj_id)
-                return cleaned
+                return cleaned_set
 
             try:
                 pickle.dumps(obj)

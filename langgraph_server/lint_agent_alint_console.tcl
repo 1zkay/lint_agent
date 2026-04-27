@@ -1,37 +1,33 @@
-# Register non-blocking lint-agent commands for the ALINT-PRO Tcl console.
+# Register lint-agent commands for the ALINT-PRO Tcl console.
 #
 # Load once in ALINT-PRO console:
-#   source D:/mcp/lint_agent/langgraph_server/lint_agent_alint_console.tcl
+#   source D:/Downloads/alint-pro-customer/lint_agent/langgraph_server/lint_agent_alint_console.tcl
 #
-# Common commands:
-#   lint-agent
-#   lint-agent "prompt"
-#   lint-agent-new
-#   lint-agent-thread
-#   lint-agent-threads
-#   lint-agent-resume <thread_id>
-#   lint-agent-help
-#
-# ALINT-PRO owns the console prompt and does not hand a normal interactive
-# stdin to child processes. This wrapper implements the interactive dialogue in
-# Tcl and calls the Python CLI once per user turn. One-shot calls with a prompt
-# still run as background jobs to keep the console responsive.
+# This customer-package wrapper talks directly to the Docker-hosted LangGraph
+# Agent Server over HTTP. It does not require Python, langgraph-sdk, or the
+# Python CLI on the EDA workstation.
+
+package require http
 
 namespace eval ::LintAgent {
-    variable python "D:/software/Miniconda3/envs/mcp/python.exe"
-    variable cli "D:/mcp/lint_agent/langgraph_server/lint_agent_cli.py"
-    variable url "http://127.0.0.1:2024"
-    variable assistant "lint"
+    if {[info exists ::env(LANGGRAPH_URL)] && [string trim $::env(LANGGRAPH_URL)] ne ""} {
+        variable url $::env(LANGGRAPH_URL)
+    } else {
+        variable url "http://127.0.0.1:2024"
+    }
+    if {[info exists ::env(LANGGRAPH_ASSISTANT)] && [string trim $::env(LANGGRAPH_ASSISTANT)] ne ""} {
+        variable assistant $::env(LANGGRAPH_ASSISTANT)
+    } else {
+        variable assistant "lint"
+    }
     variable thread_id ""
     variable user_id ""
-    variable recursion_limit ""
+    variable recursion_limit "50"
+    variable request_timeout 1200000
     variable job_counter 0
-    variable prompt_counter 0
     variable jobs
 }
 
-set ::env(PYTHONUTF8) 1
-set ::env(PYTHONIOENCODING) "utf-8"
 catch {fconfigure stdin -encoding utf-8}
 catch {fconfigure stdout -encoding utf-8}
 catch {fconfigure stderr -encoding utf-8}
@@ -46,15 +42,6 @@ proc ::LintAgent::random_hex {count} {
 }
 
 proc ::LintAgent::new_uuid {} {
-    variable python
-
-    if {![catch {exec $python -c "import uuid; print(uuid.uuid4())"} result]} {
-        set result [string trim $result]
-        if {[::LintAgent::valid_uuid $result]} {
-            return $result
-        }
-    }
-
     set part1 [::LintAgent::random_hex 8]
     set part2 [::LintAgent::random_hex 4]
     set part3 "4[::LintAgent::random_hex 3]"
@@ -96,42 +83,526 @@ proc ::LintAgent::active_user_id {} {
     return [::LintAgent::default_user_id]
 }
 
-proc ::LintAgent::job_dir {} {
-    set dir [file normalize [file join [pwd] ".lint_agent_jobs"]]
-    if {![file exists $dir]} {
-        file mkdir $dir
+proc ::LintAgent::json_escape {text} {
+    set out ""
+    set len [string length $text]
+    for {set i 0} {$i < $len} {incr i} {
+        set ch [string index $text $i]
+        scan $ch %c code
+        switch -- $ch {
+            "\"" {append out "\\\""}
+            "\\" {append out "\\\\"}
+            "\b" {append out "\\b"}
+            "\f" {append out "\\f"}
+            "\n" {append out "\\n"}
+            "\r" {append out "\\r"}
+            "\t" {append out "\\t"}
+            default {
+                if {$code < 32} {
+                    append out [format "\\u%04x" $code]
+                } else {
+                    append out $ch
+                }
+            }
+        }
     }
-    return $dir
+    return $out
 }
 
-proc ::LintAgent::write_prompt_file {prompt} {
-    variable prompt_counter
-
-    incr prompt_counter
-    set prompt_file [file normalize [file join [::LintAgent::job_dir] "prompt_${prompt_counter}_[pid].txt"]]
-    set f [open $prompt_file w]
-    fconfigure $f -encoding utf-8
-    puts -nonewline $f $prompt
-    close $f
-    return $prompt_file
+proc ::LintAgent::json_string {text} {
+    return "\"[::LintAgent::json_escape $text]\""
 }
 
-proc ::LintAgent::read_file_if_exists {path} {
-    if {![file exists $path]} {
+proc ::LintAgent::json_bool {value} {
+    if {$value} {
+        return "true"
+    }
+    return "false"
+}
+
+proc ::LintAgent::json_metadata {run_user} {
+    variable assistant
+
+    set authenticated [expr {$run_user ne ""}]
+    if {$run_user eq ""} {
+        set run_user [::LintAgent::default_user_id]
+    }
+    return "{\"source\":\"lint-agent-tcl\",\"assistant\":[::LintAgent::json_string $assistant],\"user_id\":[::LintAgent::json_string $run_user],\"authenticated\":[::LintAgent::json_bool $authenticated]}"
+}
+
+proc ::LintAgent::json_context {thread run_user} {
+    set authenticated [expr {$run_user ne ""}]
+    if {$run_user eq ""} {
+        set run_user [::LintAgent::default_user_id]
+    }
+    return "{\"user_id\":[::LintAgent::json_string $run_user],\"thread_id\":[::LintAgent::json_string $thread],\"authenticated\":[::LintAgent::json_bool $authenticated]}"
+}
+
+proc ::LintAgent::json_run_payload {thread prompt run_user run_recursion} {
+    variable assistant
+
+    set body "{"
+    append body "\"assistant_id\":[::LintAgent::json_string $assistant],"
+    append body "\"input\":{\"messages\":\[{\"role\":\"user\",\"content\":[::LintAgent::json_string $prompt]}\]},"
+    append body "\"metadata\":[::LintAgent::json_metadata $run_user],"
+    append body "\"context\":[::LintAgent::json_context $thread $run_user],"
+    append body "\"if_not_exists\":\"create\""
+    if {$run_recursion ne ""} {
+        append body ",\"config\":{\"recursion_limit\":$run_recursion}"
+    }
+    append body "}"
+    return $body
+}
+
+proc ::LintAgent::json_thread_payload {thread run_user} {
+    variable assistant
+
+    set body "{"
+    append body "\"thread_id\":[::LintAgent::json_string $thread],"
+    append body "\"metadata\":[::LintAgent::json_metadata $run_user],"
+    append body "\"if_exists\":\"do_nothing\","
+    append body "\"graph_id\":[::LintAgent::json_string $assistant]"
+    append body "}"
+    return $body
+}
+
+proc ::LintAgent::json_search_threads_payload {include_all limit} {
+    set body "{"
+    if {!$include_all} {
+        append body "\"metadata\":{\"user_id\":[::LintAgent::json_string [::LintAgent::active_user_id]]},"
+    }
+    append body "\"limit\":$limit,"
+    append body "\"sort_by\":\"updated_at\","
+    append body "\"sort_order\":\"desc\","
+    append body "\"select\":\[\"thread_id\",\"created_at\",\"updated_at\",\"metadata\",\"status\"\]"
+    append body "}"
+    return $body
+}
+
+proc ::LintAgent::url_join {base path} {
+    set base [string trimright $base "/"]
+    return "$base$path"
+}
+
+proc ::LintAgent::http_request_sync {method run_url path {body ""}} {
+    variable request_timeout
+
+    set full_url [::LintAgent::url_join $run_url $path]
+    set headers [list Accept "application/json"]
+    set options [list -method $method -headers $headers -timeout $request_timeout]
+    if {$body ne ""} {
+        lappend options -type "application/json; charset=utf-8"
+        lappend options -query [encoding convertto utf-8 $body]
+    }
+    set token [http::geturl $full_url {*}$options]
+    set status [http::status $token]
+    set ncode [http::ncode $token]
+    set data [encoding convertfrom utf-8 [http::data $token]]
+    http::cleanup $token
+    if {$status ne "ok" || $ncode < 200 || $ncode >= 300} {
+        error "HTTP $method $path failed: status=$status code=$ncode body=$data"
+    }
+    return $data
+}
+
+proc ::LintAgent::http_request_async {job_id method run_url path body} {
+    variable request_timeout
+
+    set full_url [::LintAgent::url_join $run_url $path]
+    set headers [list Accept "application/json"]
+    set options [list -method $method -headers $headers -timeout $request_timeout -command [list ::LintAgent::http_done $job_id]]
+    if {$body ne ""} {
+        lappend options -type "application/json; charset=utf-8"
+        lappend options -query [encoding convertto utf-8 $body]
+    }
+    return [http::geturl $full_url {*}$options]
+}
+
+proc ::LintAgent::json_skip_ws {json_var idx_var} {
+    upvar 1 $json_var json $idx_var idx
+    set len [string length $json]
+    while {$idx < $len} {
+        set ch [string index $json $idx]
+        if {$ch ni {" " "\t" "\r" "\n"}} {
+            break
+        }
+        incr idx
+    }
+}
+
+proc ::LintAgent::json_parse_string {json_var idx_var} {
+    upvar 1 $json_var json $idx_var idx
+    incr idx
+    set out ""
+    set len [string length $json]
+    while {$idx < $len} {
+        set ch [string index $json $idx]
+        incr idx
+        if {$ch eq "\""} {
+            return $out
+        }
+        if {$ch ne "\\"} {
+            append out $ch
+            continue
+        }
+        if {$idx >= $len} {
+            error "invalid JSON string escape"
+        }
+        set esc [string index $json $idx]
+        incr idx
+        switch -- $esc {
+            "\"" {append out "\""}
+            "\\" {append out "\\"}
+            "/" {append out "/"}
+            "b" {append out "\b"}
+            "f" {append out "\f"}
+            "n" {append out "\n"}
+            "r" {append out "\r"}
+            "t" {append out "\t"}
+            "u" {
+                if {$idx + 3 >= $len} {
+                    error "invalid JSON unicode escape"
+                }
+                set hex [string range $json $idx [expr {$idx + 3}]]
+                incr idx 4
+                if {![regexp -nocase {^[0-9a-f]{4}$} $hex]} {
+                    error "invalid JSON unicode escape"
+                }
+                scan $hex %x code
+                append out [format %c $code]
+            }
+            default {error "invalid JSON escape \\$esc"}
+        }
+    }
+    error "unterminated JSON string"
+}
+
+proc ::LintAgent::json_parse_literal {json_var idx_var literal type value} {
+    upvar 1 $json_var json $idx_var idx
+    set end [expr {$idx + [string length $literal] - 1}]
+    if {[string range $json $idx $end] ne $literal} {
+        error "invalid JSON literal"
+    }
+    set idx [expr {$end + 1}]
+    return [list $type $value]
+}
+
+proc ::LintAgent::json_parse_number {json_var idx_var} {
+    upvar 1 $json_var json $idx_var idx
+    set start $idx
+    set len [string length $json]
+    while {$idx < $len} {
+        set ch [string index $json $idx]
+        if {![regexp {[-+0-9.eE]} $ch]} {
+            break
+        }
+        incr idx
+    }
+    return [list number [string range $json $start [expr {$idx - 1}]]]
+}
+
+proc ::LintAgent::json_parse_array {json_var idx_var} {
+    upvar 1 $json_var json $idx_var idx
+    incr idx
+    set values {}
+    ::LintAgent::json_skip_ws json idx
+    if {[string index $json $idx] eq "\]"} {
+        incr idx
+        return [list array $values]
+    }
+    while {1} {
+        lappend values [::LintAgent::json_parse_value json idx]
+        ::LintAgent::json_skip_ws json idx
+        set ch [string index $json $idx]
+        if {$ch eq ","} {
+            incr idx
+            continue
+        }
+        if {$ch eq "\]"} {
+            incr idx
+            return [list array $values]
+        }
+        error "expected , or \] in JSON array"
+    }
+}
+
+proc ::LintAgent::json_parse_object {json_var idx_var} {
+    upvar 1 $json_var json $idx_var idx
+    incr idx
+    set result [dict create]
+    ::LintAgent::json_skip_ws json idx
+    if {[string index $json $idx] eq "\}"} {
+        incr idx
+        return [list object $result]
+    }
+    while {1} {
+        ::LintAgent::json_skip_ws json idx
+        if {[string index $json $idx] ne "\""} {
+            error "expected JSON object key"
+        }
+        set key [::LintAgent::json_parse_string json idx]
+        ::LintAgent::json_skip_ws json idx
+        if {[string index $json $idx] ne ":"} {
+            error "expected : after JSON object key"
+        }
+        incr idx
+        set value [::LintAgent::json_parse_value json idx]
+        dict set result $key $value
+        ::LintAgent::json_skip_ws json idx
+        set ch [string index $json $idx]
+        if {$ch eq ","} {
+            incr idx
+            continue
+        }
+        if {$ch eq "\}"} {
+            incr idx
+            return [list object $result]
+        }
+        error "expected , or \} in JSON object"
+    }
+}
+
+proc ::LintAgent::json_parse_value {json_var idx_var} {
+    upvar 1 $json_var json $idx_var idx
+    ::LintAgent::json_skip_ws json idx
+    set ch [string index $json $idx]
+    switch -- $ch {
+        "\"" {return [list string [::LintAgent::json_parse_string json idx]]}
+        "\{" {return [::LintAgent::json_parse_object json idx]}
+        "\[" {return [::LintAgent::json_parse_array json idx]}
+        "t" {return [::LintAgent::json_parse_literal json idx true bool 1]}
+        "f" {return [::LintAgent::json_parse_literal json idx false bool 0]}
+        "n" {return [::LintAgent::json_parse_literal json idx null null ""]}
+        default {return [::LintAgent::json_parse_number json idx]}
+    }
+}
+
+proc ::LintAgent::json_parse {json} {
+    set idx 0
+    set value [::LintAgent::json_parse_value json idx]
+    ::LintAgent::json_skip_ws json idx
+    return $value
+}
+
+proc ::LintAgent::json_type {value} {
+    return [lindex $value 0]
+}
+
+proc ::LintAgent::json_unwrap {value} {
+    return [lindex $value 1]
+}
+
+proc ::LintAgent::json_get {value key {default ""}} {
+    if {[::LintAgent::json_type $value] ne "object"} {
+        return $default
+    }
+    set dict_value [::LintAgent::json_unwrap $value]
+    if {![dict exists $dict_value $key]} {
+        return $default
+    }
+    return [dict get $dict_value $key]
+}
+
+proc ::LintAgent::json_string_value {value {default ""}} {
+    if {$value eq ""} {
+        return $default
+    }
+    set type [::LintAgent::json_type $value]
+    if {$type in {"string" "number" "bool"}} {
+        return [::LintAgent::json_unwrap $value]
+    }
+    return $default
+}
+
+proc ::LintAgent::message_text {message} {
+    set content [::LintAgent::json_get $message "content"]
+    if {$content eq ""} {
         return ""
     }
-    set f [open $path r]
-    fconfigure $f -encoding utf-8
-    set text [read $f]
-    close $f
-    return $text
+    if {[::LintAgent::json_type $content] eq "string"} {
+        return [::LintAgent::json_unwrap $content]
+    }
+    if {[::LintAgent::json_type $content] eq "array"} {
+        set out ""
+        foreach item [::LintAgent::json_unwrap $content] {
+            if {[::LintAgent::json_type $item] ne "object"} {
+                continue
+            }
+            set text [::LintAgent::json_get $item "text"]
+            if {$text eq ""} {
+                set text [::LintAgent::json_get $item "content"]
+            }
+            append out [::LintAgent::json_string_value $text]
+        }
+        return $out
+    }
+    return ""
 }
 
-proc ::LintAgent::is_pid_alive {pid} {
-    if {[catch {exec tasklist /FI "PID eq $pid" /FO CSV /NH} output]} {
-        return 0
+proc ::LintAgent::last_ai_text {json_text} {
+    if {[catch {set parsed [::LintAgent::json_parse $json_text]}]} {
+        return ""
     }
-    return [expr {[string first "\"$pid\"" $output] >= 0}]
+    set messages [::LintAgent::json_get $parsed "messages"]
+    if {$messages eq ""} {
+        set values [::LintAgent::json_get $parsed "values"]
+        set messages [::LintAgent::json_get $values "messages"]
+    }
+    if {$messages eq "" || [::LintAgent::json_type $messages] ne "array"} {
+        return ""
+    }
+    set items [::LintAgent::json_unwrap $messages]
+    for {set i [expr {[llength $items] - 1}]} {$i >= 0} {incr i -1} {
+        set message [lindex $items $i]
+        set role [string tolower [::LintAgent::json_string_value [::LintAgent::json_get $message "type"]]]
+        if {$role eq ""} {
+            set role [string tolower [::LintAgent::json_string_value [::LintAgent::json_get $message "role"]]]
+        }
+        if {$role in {"ai" "assistant"}} {
+            set text [string trim [::LintAgent::message_text $message]]
+            if {$text ne ""} {
+                return $text
+            }
+        }
+    }
+    return ""
+}
+
+proc ::LintAgent::print_thread_search {json_text current_thread} {
+    if {[catch {set parsed [::LintAgent::json_parse $json_text]}]} {
+        puts $json_text
+        return
+    }
+    if {[::LintAgent::json_type $parsed] ne "array"} {
+        puts $json_text
+        return
+    }
+    set items [::LintAgent::json_unwrap $parsed]
+    if {[llength $items] == 0} {
+        puts "no threads found"
+        return
+    }
+    puts "recent threads:"
+    set index 1
+    foreach item $items {
+        set tid [::LintAgent::json_string_value [::LintAgent::json_get $item "thread_id"]]
+        set status [::LintAgent::json_string_value [::LintAgent::json_get $item "status"]]
+        set updated [::LintAgent::json_string_value [::LintAgent::json_get $item "updated_at"]]
+        set metadata [::LintAgent::json_get $item "metadata"]
+        set uid [::LintAgent::json_string_value [::LintAgent::json_get $metadata "user_id"]]
+        set marker " "
+        if {$tid eq $current_thread} {
+            set marker "*"
+        }
+        puts [format "%s %2d. %s  %s  %s  user=%s" $marker $index $tid $status $updated $uid]
+        incr index
+    }
+    puts "use /resume <thread_id> to switch"
+}
+
+proc ::LintAgent::default_assistant_id {run_url} {
+    variable assistant
+
+    set body "{\"graph_id\":[::LintAgent::json_string $assistant],\"limit\":1,\"sort_by\":\"updated_at\",\"sort_order\":\"desc\"}"
+    set response [::LintAgent::http_request_sync POST $run_url "/assistants/search" $body]
+    set parsed [::LintAgent::json_parse $response]
+    if {[::LintAgent::json_type $parsed] eq "array" && [llength [::LintAgent::json_unwrap $parsed]] > 0} {
+        set first [lindex [::LintAgent::json_unwrap $parsed] 0]
+        set assistant_id [::LintAgent::json_string_value [::LintAgent::json_get $first "assistant_id"]]
+        if {$assistant_id ne ""} {
+            return $assistant_id
+        }
+    }
+    return $assistant
+}
+
+proc ::LintAgent::ensure_remote_thread {thread run_user run_url} {
+    set body [::LintAgent::json_thread_payload $thread $run_user]
+    if {[catch {::LintAgent::http_request_sync POST $run_url "/threads" $body} err]} {
+        puts "warning: failed to pre-create thread metadata: $err"
+    }
+}
+
+proc ::LintAgent::start_prompt_job {prompt run_user run_url run_recursion {announce 1} {output_label ""}} {
+    variable job_counter
+    variable jobs
+
+    set thread [::LintAgent::ensure_thread]
+    ::LintAgent::ensure_remote_thread $thread $run_user $run_url
+    set body [::LintAgent::json_run_payload $thread $prompt $run_user $run_recursion]
+
+    incr job_counter
+    set job_id $job_counter
+    set jobs($job_id,thread_id) $thread
+    set jobs($job_id,kind) "prompt"
+    set jobs($job_id,label) "prompt"
+    set jobs($job_id,announce) $announce
+    set jobs($job_id,output_label) $output_label
+    set jobs($job_id,run_url) $run_url
+
+    if {[catch {set token [::LintAgent::http_request_async $job_id POST $run_url "/threads/$thread/runs/wait" $body]} err]} {
+        ::LintAgent::cleanup_job $job_id
+        error "failed to start lint-agent HTTP request: $err"
+    }
+    set jobs($job_id,token) $token
+    if {$announce} {
+        puts "lint-agent job $job_id started: prompt"
+        puts "thread_id: $thread"
+    }
+    return $job_id
+}
+
+proc ::LintAgent::http_done {job_id token} {
+    variable jobs
+
+    if {![info exists jobs($job_id,token)]} {
+        http::cleanup $token
+        return
+    }
+
+    set thread $jobs($job_id,thread_id)
+    set announce $jobs($job_id,announce)
+    set output_label $jobs($job_id,output_label)
+    set wait_var ""
+    if {[info exists jobs($job_id,wait_var)]} {
+        set wait_var $jobs($job_id,wait_var)
+    }
+
+    set status [http::status $token]
+    set ncode [http::ncode $token]
+    set data [encoding convertfrom utf-8 [http::data $token]]
+    set error_text [http::error $token]
+    http::cleanup $token
+
+    puts ""
+    if {$announce} {
+        puts "lint-agent job $job_id finished: prompt"
+        puts "thread_id: $thread"
+    }
+    if {$status ne "ok" || $ncode < 200 || $ncode >= 300} {
+        puts "lint-agent failed: HTTP status=$status code=$ncode"
+        if {$error_text ne ""} {
+            puts $error_text
+        }
+        if {$data ne ""} {
+            puts $data
+        }
+    } else {
+        set text [::LintAgent::last_ai_text $data]
+        if {$output_label ne ""} {
+            puts "$output_label:"
+        }
+        if {$text ne ""} {
+            puts $text
+        } else {
+            puts $data
+        }
+    }
+
+    ::LintAgent::cleanup_job $job_id
+    if {$wait_var ne ""} {
+        set $wait_var 1
+    }
 }
 
 proc ::LintAgent::cleanup_job {job_id} {
@@ -142,198 +613,18 @@ proc ::LintAgent::cleanup_job {job_id} {
     }
 }
 
-proc ::LintAgent::running_prompt_job_for_thread {thread} {
-    variable jobs
-
-    foreach key [array names jobs "*,thread_id"] {
-        set job_id [lindex [split $key ","] 0]
-        if {![info exists jobs($job_id,kind)] || $jobs($job_id,kind) ne "prompt"} {
-            continue
-        }
-        if {$jobs($key) eq $thread} {
-            return $job_id
-        }
-    }
-    return ""
-}
-
-proc ::LintAgent::poll {job_id} {
-    variable jobs
-
-    if {![info exists jobs($job_id,pid)]} {
-        return
-    }
-
-    set pid $jobs($job_id,pid)
-    set output_file $jobs($job_id,output_file)
-    set label $jobs($job_id,label)
-    set thread $jobs($job_id,thread_id)
-    set announce 1
-    if {[info exists jobs($job_id,announce)]} {
-        set announce $jobs($job_id,announce)
-    }
-    set wait_var ""
-    if {[info exists jobs($job_id,wait_var)]} {
-        set wait_var $jobs($job_id,wait_var)
-    }
-    set output_label ""
-    if {[info exists jobs($job_id,output_label)]} {
-        set output_label $jobs($job_id,output_label)
-    }
-
-    if {[::LintAgent::is_pid_alive $pid]} {
-        after 500 [list ::LintAgent::poll $job_id]
-        return
-    }
-
-    set output [string trim [::LintAgent::read_file_if_exists $output_file]]
-    puts ""
-    if {$announce} {
-        puts "lint-agent job $job_id finished: $label"
-        puts "thread_id: $thread"
-    }
-    if {$output eq ""} {
-        puts "lint-agent finished with no output."
-    } else {
-        if {$output_label ne ""} {
-            puts "$output_label:"
-        }
-        puts $output
-    }
-
-    catch {file delete -force $output_file}
-    ::LintAgent::cleanup_job $job_id
-    if {$wait_var ne ""} {
-        set $wait_var 1
-    }
-}
-
-proc ::LintAgent::base_cli_cmd {thread run_user run_url run_recursion} {
-    variable python
-    variable cli
-    variable assistant
-
-    set cmd [list $python $cli --url $run_url --assistant $assistant --thread-id $thread]
-    if {$run_user ne ""} {
-        lappend cmd --user-id $run_user
-    }
-    if {$run_recursion ne ""} {
-        lappend cmd --recursion-limit $run_recursion
-    }
-    return $cmd
-}
-
-proc ::LintAgent::start_background_job {cmd label thread kind {announce 1}} {
-    variable job_counter
-    variable jobs
-
-    incr job_counter
-    set job_id $job_counter
-    set output_file [file normalize [file join [::LintAgent::job_dir] "lint_agent_${job_id}_[pid].out"]]
-    if {[catch {set pid_list [exec {*}$cmd > $output_file 2>@1 &]} err]} {
-        catch {file delete -force $output_file}
-        error "failed to start lint-agent: $err"
-    }
-
-    set pid [lindex $pid_list 0]
-    set jobs($job_id,pid) $pid
-    set jobs($job_id,output_file) $output_file
-    set jobs($job_id,label) $label
-    set jobs($job_id,thread_id) $thread
-    set jobs($job_id,kind) $kind
-    set jobs($job_id,announce) $announce
-
-    if {$announce} {
-        puts "lint-agent job $job_id started: $label"
-        puts "thread_id: $thread"
-    }
-    after 500 [list ::LintAgent::poll $job_id]
-    return $job_id
-}
-
-proc ::LintAgent::run_background {cmd label thread kind} {
-    ::LintAgent::start_background_job $cmd $label $thread $kind 1
-    return ""
-}
-
-proc ::LintAgent::run_sync {cmd} {
-    variable job_counter
-
-    incr job_counter
-    set output_file [file normalize [file join [::LintAgent::job_dir] "lint_agent_sync_${job_counter}_[pid].out"]]
-    set status 0
-    set exec_error ""
-
-    if {[catch {exec {*}$cmd > $output_file 2>@1} err]} {
-        set status 1
-        set exec_error [string trim $err]
-    }
-
-    set output [string trim [::LintAgent::read_file_if_exists $output_file]]
-    if {$output ne ""} {
-        puts $output
-    } elseif {$exec_error ne ""} {
-        puts $exec_error
-    }
-
-    catch {file delete -force $output_file}
-    return $status
-}
-
-proc ::LintAgent::run_sync_prompt {prompt auto_approve auto_reject run_user run_url run_recursion} {
-    set thread [::LintAgent::ensure_thread]
-    set active_job [::LintAgent::running_prompt_job_for_thread $thread]
-    if {$active_job ne ""} {
-        puts "thread $thread already has running lint-agent job $active_job; wait for it or use /new"
-        return 1
-    }
-
-    set prompt_file [::LintAgent::write_prompt_file $prompt]
-    set cmd [::LintAgent::base_cli_cmd $thread $run_user $run_url $run_recursion]
-    lappend cmd --prompt-file $prompt_file --delete-prompt-file
-    if {$auto_approve} {
-        lappend cmd --auto-approve
-    }
-    if {$auto_reject} {
-        lappend cmd --auto-reject
-    }
-    return [::LintAgent::run_sync $cmd]
-}
-
 proc ::LintAgent::run_dialog_prompt {prompt auto_approve auto_reject run_user run_url run_recursion} {
     variable jobs
 
-    set thread [::LintAgent::ensure_thread]
-    set active_job [::LintAgent::running_prompt_job_for_thread $thread]
-    if {$active_job ne ""} {
-        puts "thread $thread already has running lint-agent job $active_job; wait for it or use /new"
-        return 1
+    if {$auto_approve || $auto_reject} {
+        puts "warning: Tcl HTTP client does not implement interactive HITL decisions; server-side approval should be disabled."
     }
-
-    set prompt_file [::LintAgent::write_prompt_file $prompt]
-    set cmd [::LintAgent::base_cli_cmd $thread $run_user $run_url $run_recursion]
-    lappend cmd --prompt-file $prompt_file --delete-prompt-file
-    if {$auto_approve} {
-        lappend cmd --auto-approve
-    }
-    if {$auto_reject} {
-        lappend cmd --auto-reject
-    }
-
-    set job_id [::LintAgent::start_background_job $cmd "prompt" $thread "prompt" 0]
+    set job_id [::LintAgent::start_prompt_job $prompt $run_user $run_url $run_recursion 0 "assistant"]
     set wait_var "::LintAgent::dialog_done_$job_id"
     set jobs($job_id,wait_var) $wait_var
-    set jobs($job_id,output_label) "assistant"
     vwait $wait_var
     catch {unset $wait_var}
     return 0
-}
-
-proc ::LintAgent::run_sync_repl_command {slash_command run_user run_url run_recursion} {
-    set thread [::LintAgent::ensure_thread]
-    set cmd [::LintAgent::base_cli_cmd $thread $run_user $run_url $run_recursion]
-    lappend cmd --repl-command $slash_command
-    return [::LintAgent::run_sync $cmd]
 }
 
 proc ::LintAgent::parse_flags {arg_list} {
@@ -448,6 +739,84 @@ proc ::LintAgent::resolve_call_options {thread_override user_override url_overri
     return [list $run_thread $run_user $run_url $run_recursion]
 }
 
+proc ::LintAgent::parse_threads_command {prompt} {
+    set parts [split $prompt]
+    set include_all 0
+    set limit 10
+    if {[llength $parts] >= 2} {
+        if {[string tolower [lindex $parts 1]] eq "all"} {
+            set include_all 1
+            if {[llength $parts] >= 3} {
+                set limit [lindex $parts 2]
+            }
+        } else {
+            set limit [lindex $parts 1]
+        }
+    }
+    if {![string is integer -strict $limit]} {
+        set limit 10
+    }
+    if {$limit < 1} {
+        set limit 1
+    }
+    if {$limit > 50} {
+        set limit 50
+    }
+    return [list $include_all $limit]
+}
+
+proc ::LintAgent::sync_repl_command {slash_command run_user run_url run_recursion} {
+    set thread [::LintAgent::ensure_thread]
+    set lowered [string tolower [string trim $slash_command]]
+    if {$lowered eq "/thread-info"} {
+        puts [::LintAgent::http_request_sync GET $run_url "/threads/$thread"]
+        return ""
+    }
+    if {$lowered eq "/state"} {
+        puts [::LintAgent::http_request_sync GET $run_url "/threads/$thread/state"]
+        return ""
+    }
+    if {$lowered eq "/graph"} {
+        set assistant_id [::LintAgent::default_assistant_id $run_url]
+        puts [::LintAgent::http_request_sync GET $run_url "/assistants/$assistant_id/graph"]
+        return ""
+    }
+    if {$lowered eq "/schemas"} {
+        set assistant_id [::LintAgent::default_assistant_id $run_url]
+        puts [::LintAgent::http_request_sync GET $run_url "/assistants/$assistant_id/schemas"]
+        return ""
+    }
+    if {$lowered eq "/threads" || [string match "/threads *" $lowered]} {
+        lassign [::LintAgent::parse_threads_command $slash_command] include_all limit
+        set body [::LintAgent::json_search_threads_payload $include_all $limit]
+        set response [::LintAgent::http_request_sync POST $run_url "/threads/search" $body]
+        ::LintAgent::print_thread_search $response $thread
+        return ""
+    }
+    if {$lowered eq "/history" || [string match "/history *" $lowered]} {
+        set limit [lindex [split $slash_command] 1]
+        if {![string is integer -strict $limit]} {
+            set limit 10
+        }
+        puts [::LintAgent::http_request_sync GET $run_url "/threads/$thread/history?limit=$limit"]
+        return ""
+    }
+    if {$lowered eq "/runs" || [string match "/runs *" $lowered]} {
+        set limit [lindex [split $slash_command] 1]
+        if {![string is integer -strict $limit]} {
+            set limit 10
+        }
+        puts [::LintAgent::http_request_sync GET $run_url "/threads/$thread/runs?limit=$limit"]
+        return ""
+    }
+    if {$lowered eq "/assistant" || [string match "/assistant *" $lowered]} {
+        puts [::LintAgent::http_request_sync POST $run_url "/assistants/search" "{\"graph_id\":[::LintAgent::json_string $::LintAgent::assistant],\"limit\":10}"]
+        return ""
+    }
+    puts "unsupported command in Tcl HTTP client: $slash_command"
+    return ""
+}
+
 proc ::LintAgent::dialog_help {} {
     puts "commands:"
     puts {  /new                 start a new persistent thread}
@@ -456,13 +825,10 @@ proc ::LintAgent::dialog_help {} {
     puts {  /resume <thread_id>  switch to an existing persistent thread}
     puts {  /thread              show the current thread_id}
     puts {  /thread-info         show current thread metadata}
-    puts {  /state               show current thread state summary}
-    puts {  /history [limit]     show current thread checkpoint history}
-    puts {  /runs [limit]        list runs on current thread}
-    puts {  /run <run_id>        show one run as JSON}
-    puts {  /cancel <run_id>     cancel a pending/running run}
-    puts {  /assistants [limit]  list assistants for this graph}
-    puts {  /assistant [id]      show assistant metadata}
+    puts {  /state               show current thread state JSON}
+    puts {  /history [limit]     show current thread checkpoint history JSON}
+    puts {  /runs [limit]        list runs on current thread as JSON}
+    puts {  /assistant           search assistants for this graph}
     puts {  /graph               show assistant graph JSON}
     puts {  /schemas             show assistant schemas JSON}
     puts {  /help                show this help}
@@ -537,7 +903,9 @@ proc ::LintAgent::dialog {auto_approve auto_reject thread_override user_override
             continue
         }
         if {[string index $prompt 0] eq "/"} {
-            ::LintAgent::run_sync_repl_command $prompt $run_user $run_url $run_recursion
+            if {[catch {::LintAgent::sync_repl_command $prompt $run_user $run_url $run_recursion} err]} {
+                puts "lint-agent command failed: $err"
+            }
             continue
         }
 
@@ -559,23 +927,13 @@ proc ::LintAgent::call {args} {
 
     set resolved [::LintAgent::resolve_call_options $thread_override $user_override $url_override $recursion_override $switch_current_thread 0]
     lassign $resolved run_thread run_user run_url run_recursion
-
-    set active_job [::LintAgent::running_prompt_job_for_thread $run_thread]
-    if {$active_job ne ""} {
-        error "thread $run_thread already has running lint-agent job $active_job; wait for it or use lint-agent-new"
+    set old_thread $::LintAgent::thread_id
+    set ::LintAgent::thread_id $run_thread
+    set job_id [::LintAgent::start_prompt_job $prompt $run_user $run_url $run_recursion 1 ""]
+    if {!$switch_current_thread} {
+        set ::LintAgent::thread_id $old_thread
     }
-
-    set prompt_file [::LintAgent::write_prompt_file $prompt]
-    set cmd [::LintAgent::base_cli_cmd $run_thread $run_user $run_url $run_recursion]
-    lappend cmd --prompt-file $prompt_file --delete-prompt-file
-    if {$auto_approve} {
-        lappend cmd --auto-approve
-    }
-    if {$auto_reject} {
-        lappend cmd --auto-reject
-    }
-
-    return [::LintAgent::run_background $cmd "prompt" $run_thread "prompt"]
+    return $job_id
 }
 
 proc ::LintAgent::run_repl_command {slash_command label} {
@@ -583,10 +941,7 @@ proc ::LintAgent::run_repl_command {slash_command label} {
     variable user_id
     variable recursion_limit
 
-    set thread [::LintAgent::ensure_thread]
-    set cmd [::LintAgent::base_cli_cmd $thread $user_id $url $recursion_limit]
-    lappend cmd --repl-command $slash_command
-    return [::LintAgent::run_background $cmd $label $thread "command"]
+    return [::LintAgent::sync_repl_command $slash_command $user_id $url $recursion_limit]
 }
 
 proc ::LintAgent::new_thread {} {
@@ -648,11 +1003,7 @@ proc ::LintAgent::runs {args} {
 }
 
 proc ::LintAgent::assistant_info {args} {
-    set command "/assistant"
-    if {[llength $args] > 0} {
-        append command " " [join $args " "]
-    }
-    return [::LintAgent::run_repl_command $command "assistant"]
+    return [::LintAgent::run_repl_command "/assistant" "assistant"]
 }
 
 proc ::LintAgent::graph {} {
@@ -669,7 +1020,7 @@ proc ::LintAgent::user {args} {
     if {[llength $args] == 0} {
         puts "user_id: [::LintAgent::active_user_id]"
         if {$user_id eq ""} {
-            puts "source: default Python CLI user"
+            puts "source: USERNAME/USER environment"
         }
         return ""
     }
@@ -720,22 +1071,13 @@ proc ::LintAgent::set_recursion_limit {args} {
     variable recursion_limit
 
     if {[llength $args] == 0} {
-        if {$recursion_limit eq ""} {
-            puts "recursion_limit: Python CLI default"
-        } else {
-            puts "recursion_limit: $recursion_limit"
-        }
+        puts "recursion_limit: $recursion_limit"
         return ""
     }
     if {[llength $args] != 1} {
-        error {usage: lint-agent-recursion-limit ?number|-default?}
+        error {usage: lint-agent-recursion-limit ?number?}
     }
-    set value [lindex $args 0]
-    if {$value eq "-default"} {
-        set recursion_limit ""
-    } else {
-        set recursion_limit $value
-    }
+    set recursion_limit [lindex $args 0]
     return [::LintAgent::set_recursion_limit]
 }
 
@@ -743,7 +1085,7 @@ proc ::LintAgent::jobs {} {
     variable jobs
 
     set ids {}
-    foreach key [array names jobs "*,pid"] {
+    foreach key [array names jobs "*,token"] {
         lappend ids [lindex [split $key ","] 0]
     }
     set ids [lsort -integer -unique $ids]
@@ -752,7 +1094,7 @@ proc ::LintAgent::jobs {} {
         return ""
     }
     foreach job_id $ids {
-        puts "job $job_id pid=$jobs($job_id,pid) kind=$jobs($job_id,kind) label=$jobs($job_id,label) thread=$jobs($job_id,thread_id)"
+        puts "job $job_id kind=$jobs($job_id,kind) label=$jobs($job_id,label) thread=$jobs($job_id,thread_id)"
     }
     return ""
 }
@@ -761,23 +1103,19 @@ proc ::LintAgent::help {} {
     puts "lint-agent commands:"
     puts "  lint-agent                                  enter interactive dialogue mode"
     puts "  lint-agent \"prompt\"                       run one non-blocking prompt on current thread"
-    puts "  lint-agent -auto-approve                   enter interactive mode with HITL auto-approve"
-    puts "  lint-agent -auto-reject                    enter interactive mode with HITL auto-reject"
     puts "  lint-agent -new \"prompt\"                  start a new thread and send prompt"
     puts "  lint-agent -thread <uuid> \"prompt\"        send prompt to a specific thread"
-    puts "  lint-agent -auto-approve \"prompt\"         approve HITL tool requests"
-    puts "  lint-agent -auto-reject \"prompt\"          reject HITL tool requests"
     puts "  lint-agent-new                            switch to a new empty thread"
     puts "  lint-agent-thread                         show current thread and user"
     puts "  lint-agent-resume <uuid>                  switch to an existing thread"
-    puts "  lint-agent-threads ?all? ?limit?          list threads through LangGraph SDK"
-    puts "  lint-agent-state                          show current thread state"
-    puts "  lint-agent-history ?limit?                show checkpoint history"
-    puts "  lint-agent-runs ?limit?                   list runs on current thread"
-    puts "  lint-agent-thread-info                    show thread metadata"
+    puts "  lint-agent-threads ?all? ?limit?          list threads through HTTP API"
+    puts "  lint-agent-state                          show current thread state JSON"
+    puts "  lint-agent-history ?limit?                show checkpoint history JSON"
+    puts "  lint-agent-runs ?limit?                   list runs on current thread as JSON"
+    puts "  lint-agent-thread-info                    show thread metadata JSON"
     puts "  lint-agent-user ?user_id|-default?        show or set user_id"
     puts "  lint-agent-url ?url?                      show or set Agent Server URL"
-    puts "  lint-agent-jobs                           list running background jobs"
+    puts "  lint-agent-jobs                           list running HTTP requests"
     return ""
 }
 

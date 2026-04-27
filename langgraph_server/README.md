@@ -91,6 +91,29 @@ API: http://127.0.0.1:2024
 Invoke-WebRequest http://127.0.0.1:2024/ok -UseBasicParsing
 ```
 
+### Docker 启动
+
+客户包的 `docker-compose.yml` 已包含 `langgraph-server` 服务。项目根目录执行：
+
+```powershell
+docker compose up -d --build
+```
+
+会默认启动 Chainlit Web UI 和 LangGraph Agent Server。Agent Server 在容器内监听 `0.0.0.0:2024`，映射到宿主机：
+
+```text
+http://127.0.0.1:2024
+```
+
+查看状态和日志：
+
+```powershell
+docker compose ps langgraph-server
+docker compose logs -f langgraph-server
+```
+
+Docker 只启动 Agent Server，不启动 ALINT-PRO/EDA 软件。用户需要在自己的 EDA Tcl console 中手动 source `lint_agent_alint_console.tcl`，再用 `lint-agent` 连接上述服务。
+
 ## 命令行使用
 
 Agent Server 启动后，在另一个 PowerShell 终端中调用：
@@ -225,6 +248,12 @@ CLI 不再保存“上一次 thread”的本地状态文件。thread 的选择�
 D:\mcp\lint_agent\.langgraph_api\
 ```
 
+Docker 启动方式下，该目录挂载到客户包根目录：
+
+```text
+customer-data/langgraph_api/
+```
+
 其中包括本地 dev server 的 thread、run、checkpoint、store 等运行时数据。这个目录是运行产物，已在 `.gitignore` 中排除。
 
 长期记忆使用 LangGraph store，命名空间定义在 `memory/long_term.py`：
@@ -331,25 +360,24 @@ lint-agent --auto-reject "..."
 在 ALINT-PRO console 中先加载 Tcl 包装：
 
 ```tcl
-source D:/mcp/lint_agent/langgraph_server/lint_agent_alint_console.tcl
+source D:/Downloads/alint-pro-customer/lint_agent/langgraph_server/lint_agent_alint_console.tcl
 ```
+
+如果安装目录不同，把路径替换为实际客户包路径。客户包里的 Tcl 包装直接通过 Tcl 标准 `http` 包调用 Docker 中的 LangGraph Server，不要求 EDA 工作站安装 Python、`langgraph-sdk` 或本项目 Python 依赖。
 
 ALINT-PRO Tcl console 的特点和 PowerShell/cmd 不同：
 
-- console 输入由 ALINT-PRO/Tcl 解释器接管，不会把后续用户输入直接交给 Python 子进程。
-- 如果直接运行 Python REPL，`input()` 不能稳定接管这个 console。
+- console 输入由 ALINT-PRO/Tcl 解释器接管，不适合作为外部交互式进程的 stdin。
 - Tcl namespace 变量会在当前 ALINT-PRO console 进程内保留，适合保存当前 `thread_id`。
-- 适合的模式是 Tcl 自己实现对话循环，每轮再启动短生命周期 Python CLI。
+- 适合的模式是 Tcl 自己实现对话循环，每轮通过 HTTP 调用 LangGraph Server。
 
-因此 Tcl 包装不运行 Python REPL，而是在 Tcl 层提供 `lint-agent>` 对话循环，并保存当前 `thread_id`。每一轮输入都会把同一个 UUID thread 传给 Python CLI，从而在 LangGraph Server 侧继续同一条对话。
+因此 Tcl 包装不运行 Python REPL，也不调用 `lint_agent_cli.py`，而是在 Tcl 层提供 `lint-agent>` 对话循环，并保存当前 `thread_id`。每一轮输入都会把同一个 UUID thread 通过 HTTP API 传给 LangGraph Server，从而继续同一条对话。
 
 常用调用：
 
 ```tcl
 lint-agent
 lint-agent "分析当前工程"
-lint-agent -auto-approve "允许需要审批的工具调用"
-lint-agent -auto-reject "拒绝需要审批的工具调用"
 lint-agent -new "开启一个新会话并提问"
 lint-agent -thread 11111111-1111-1111-1111-111111111111 "在指定 thread 中提问"
 ```
@@ -363,9 +391,9 @@ lint-agent> /thread
 lint-agent> /exit
 ```
 
-带 prompt 的 `lint-agent "..."` 仍是非阻塞一次性调用：命令会立刻返回 ALINT-PRO 的 `>` 提示符，后台 Python CLI 调用 `http://127.0.0.1:2024`，完成后再把结果打印回同一个 console。
+带 prompt 的 `lint-agent "..."` 仍是非阻塞一次性调用：命令会立刻返回 ALINT-PRO 的 `>` 提示符，Tcl 后台 HTTP 请求调用 `http://127.0.0.1:2024`，完成后再把结果打印回同一个 console。
 
-裸 `lint-agent` 的每一轮对话也使用后台 Python 进程执行，Tcl 侧通过 `after` 轮询和 `vwait` 等待本轮完成。这样用户输入会先立即显示为 `user: ...`，智能体回答会显示为 `assistant: ...`，ALINT-PRO 的 Tcl 事件循环仍可处理后台完成回调；为了保持同一条 thread 的消息顺序，下一轮输入会等当前回答结束后再出现提示符。
+裸 `lint-agent` 的每一轮对话也使用 Tcl 异步 HTTP 请求执行，Tcl 侧通过 `vwait` 等待本轮完成。这样用户输入会先立即显示为 `user: ...`，智能体回答会显示为 `assistant: ...`，ALINT-PRO 的 Tcl 事件循环仍可处理后台完成回调；为了保持同一条 thread 的消息顺序，下一轮输入会等当前回答结束后再出现提示符。
 
 会话管理命令：
 
@@ -376,7 +404,7 @@ lint-agent> /exit
 | `lint-agent-new` | 切换到新的空 thread |
 | `lint-agent-thread` | 查看当前 `thread_id` 和 `user_id` |
 | `lint-agent-resume <thread_id>` | 切换到已有 thread |
-| `lint-agent-threads ?all? ?limit?` | 调用 LangGraph SDK 查看 threads |
+| `lint-agent-threads ?all? ?limit?` | 通过 HTTP API 查看 threads |
 | `lint-agent-thread-info` | 查看当前 thread metadata |
 | `lint-agent-state` | 查看当前 thread state 摘要 |
 | `lint-agent-history ?limit?` | 查看 checkpoint history |
@@ -384,7 +412,7 @@ lint-agent> /exit
 | `lint-agent-assistant` | 查看 assistant metadata |
 | `lint-agent-graph` | 查看 assistant graph JSON |
 | `lint-agent-schemas` | 查看 assistant schemas JSON，输出通常较长 |
-| `lint-agent-user ?user_id?` / `lint-agent-user -default` | 查看或设置传给 Python CLI 的 user_id |
+| `lint-agent-user ?user_id?` / `lint-agent-user -default` | 查看或设置传给 LangGraph Server 的 user_id |
 | `lint-agent-url ?url?` | 查看或设置 Agent Server URL |
 | `lint-agent-jobs` | 查看正在运行的后台任务 |
 
@@ -399,7 +427,7 @@ lint-agent-resume 11111111-1111-1111-1111-111111111111
 lint-agent "继续这个 thread"
 ```
 
-同一个 thread 上如果已有未完成的 `lint-agent` prompt 任务，Tcl 包装会拒绝再次向该 thread 投递 prompt，避免同一条对话里并发 run 造成顺序混乱。可以等待任务完成，或用 `lint-agent-new` 切到新 thread。
+裸 `lint-agent` 会按轮次串行等待回答，保证同一条 thread 的消息顺序。带 prompt 的 `lint-agent "..."` 是后台 HTTP 请求，适合一次性提问；不要对同一个 thread 同时发起多条长任务。
 
 ## 与 Chainlit 的关系
 
