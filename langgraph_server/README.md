@@ -391,7 +391,7 @@ lint-agent> /thread
 lint-agent> /exit
 ```
 
-带 prompt 的 `lint-agent "..."` 使用 Tcl socket 非阻塞轮询调用 `http://127.0.0.1:2024`。它会先打印本轮请求，再等待本轮回答完成后返回；实现上不启动后台任务，这样可以保证同一条 thread 的消息顺序。
+带 prompt 的 `lint-agent "..."` 使用 Tcl socket 非阻塞轮询调用 `http://127.0.0.1:2024`。它会先打印本轮请求，再等待本轮回答完成后返回；实现上不会并发执行请求，这样可以保证同一条 thread 的消息顺序。
 
 裸 `lint-agent` 的每一轮对话也使用同一套 socket 轮询逻辑。用户输入会先立即显示为 `user: ...`，智能体回答显示为 `assistant: ...`；下一轮输入会等当前回答结束后再出现提示符。
 
