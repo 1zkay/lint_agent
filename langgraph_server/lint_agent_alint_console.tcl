@@ -3,11 +3,10 @@
 # Load once in ALINT-PRO console:
 #   source D:/Downloads/alint-pro-customer/lint_agent/langgraph_server/lint_agent_alint_console.tcl
 #
-# This customer-package wrapper talks directly to the Docker-hosted LangGraph
-# Agent Server over HTTP. It does not require Python, langgraph-sdk, or the
-# Python CLI on the EDA workstation.
-
-package require http
+# This wrapper talks directly to a LangGraph Agent Server over HTTP. It uses
+# only Tcl core socket commands because ALINT-PRO Tcl does not provide a
+# complete Tcllib http package. It does not require Python, langgraph-sdk, or
+# the Python CLI on the EDA workstation.
 
 namespace eval ::LintAgent {
     if {[info exists ::env(LANGGRAPH_URL)] && [string trim $::env(LANGGRAPH_URL)] ne ""} {
@@ -184,38 +183,218 @@ proc ::LintAgent::url_join {base path} {
     return "$base$path"
 }
 
+proc ::LintAgent::parse_http_url {run_url path} {
+    set run_url [string trim $run_url]
+    if {![regexp -nocase {^http://([^/:?#]+)(:([0-9]+))?([^?#]*)?} $run_url -> host _ port base_path]} {
+        error "unsupported Agent Server URL '$run_url'; ALINT Tcl client supports plain http://host[:port][/base-path]"
+    }
+    if {$port eq ""} {
+        set port 80
+    }
+    set base_path [string trimright $base_path "/"]
+    if {$base_path eq ""} {
+        set request_path $path
+    } else {
+        set request_path "$base_path$path"
+    }
+    if {[string index $request_path 0] ne "/"} {
+        set request_path "/$request_path"
+    }
+    set host_header $host
+    if {$port != 80} {
+        set host_header "$host:$port"
+    }
+    return [list $host $port $host_header $request_path]
+}
+
+proc ::LintAgent::http_build_request {method host_header request_path body} {
+    set body_bytes ""
+    if {$body ne ""} {
+        set body_bytes [encoding convertto utf-8 $body]
+    }
+
+    set request "$method $request_path HTTP/1.1\r\n"
+    append request "Host: $host_header\r\n"
+    append request "Accept: application/json\r\n"
+    append request "Connection: close\r\n"
+    if {$body ne ""} {
+        append request "Content-Type: application/json; charset=utf-8\r\n"
+        append request "Content-Length: [string length $body_bytes]\r\n"
+    }
+    append request "\r\n"
+    append request $body_bytes
+    return $request
+}
+
+proc ::LintAgent::http_decode_chunked {data} {
+    set out ""
+    set idx 0
+    set len [string length $data]
+
+    while {$idx < $len} {
+        set line_end [string first "\r\n" $data $idx]
+        set sep_len 2
+        if {$line_end < 0} {
+            set line_end [string first "\n" $data $idx]
+            set sep_len 1
+        }
+        if {$line_end < 0} {
+            break
+        }
+
+        set line [string trim [string range $data $idx [expr {$line_end - 1}]]]
+        set semi [string first ";" $line]
+        if {$semi >= 0} {
+            set line [string range $line 0 [expr {$semi - 1}]]
+        }
+        if {[scan $line %x chunk_size] != 1} {
+            error "invalid chunked HTTP response"
+        }
+
+        set idx [expr {$line_end + $sep_len}]
+        if {$chunk_size == 0} {
+            break
+        }
+        append out [string range $data $idx [expr {$idx + $chunk_size - 1}]]
+        set idx [expr {$idx + $chunk_size}]
+        if {[string range $data $idx [expr {$idx + 1}]] eq "\r\n"} {
+            incr idx 2
+        } elseif {[string index $data $idx] eq "\n"} {
+            incr idx
+        }
+    }
+
+    return $out
+}
+
+proc ::LintAgent::http_parse_response {raw method path} {
+    set header_end [string first "\r\n\r\n" $raw]
+    set sep_len 4
+    if {$header_end < 0} {
+        set header_end [string first "\n\n" $raw]
+        set sep_len 2
+    }
+    if {$header_end < 0} {
+        error "HTTP $method $path failed: invalid response"
+    }
+
+    set header_text [string range $raw 0 [expr {$header_end - 1}]]
+    set body_bytes [string range $raw [expr {$header_end + $sep_len}] end]
+    set lines [split [string map [list "\r\n" "\n"] $header_text] "\n"]
+    set status_line [lindex $lines 0]
+    if {![regexp {^HTTP/[0-9.]+\s+([0-9]+)} $status_line -> ncode]} {
+        error "HTTP $method $path failed: invalid status line '$status_line'"
+    }
+
+    set headers [dict create]
+    foreach line [lrange $lines 1 end] {
+        set colon [string first ":" $line]
+        if {$colon < 0} {
+            continue
+        }
+        set key [string tolower [string trim [string range $line 0 [expr {$colon - 1}]]]]
+        set value [string trim [string range $line [expr {$colon + 1}] end]]
+        dict set headers $key $value
+    }
+
+    if {[dict exists $headers "transfer-encoding"] && [string match -nocase "*chunked*" [dict get $headers "transfer-encoding"]]} {
+        set body_bytes [::LintAgent::http_decode_chunked $body_bytes]
+    }
+
+    if {[catch {set data [encoding convertfrom utf-8 $body_bytes]}]} {
+        set data $body_bytes
+    }
+    return [list $ncode $data $status_line]
+}
+
+proc ::LintAgent::http_response_complete {raw} {
+    set header_end [string first "\r\n\r\n" $raw]
+    set sep_len 4
+    if {$header_end < 0} {
+        set header_end [string first "\n\n" $raw]
+        set sep_len 2
+    }
+    if {$header_end < 0} {
+        return 0
+    }
+
+    set header_text [string range $raw 0 [expr {$header_end - 1}]]
+    set body_bytes [string range $raw [expr {$header_end + $sep_len}] end]
+    set lines [split [string map [list "\r\n" "\n"] $header_text] "\n"]
+    set headers [dict create]
+    foreach line [lrange $lines 1 end] {
+        set colon [string first ":" $line]
+        if {$colon < 0} {
+            continue
+        }
+        set key [string tolower [string trim [string range $line 0 [expr {$colon - 1}]]]]
+        set value [string trim [string range $line [expr {$colon + 1}] end]]
+        dict set headers $key $value
+    }
+
+    if {[dict exists $headers "content-length"]} {
+        set expected [dict get $headers "content-length"]
+        if {[string is integer -strict $expected]} {
+            return [expr {[string length $body_bytes] >= $expected}]
+        }
+    }
+    if {[dict exists $headers "transfer-encoding"] && [string match -nocase "*chunked*" [dict get $headers "transfer-encoding"]]} {
+        return [regexp -nocase {(^|\r\n|\n)0[ \t]*(;[^\r\n]*)?(\r\n\r\n|\n\n|\r\n\n|\n\r\n)} $body_bytes]
+    }
+    return 0
+}
+
 proc ::LintAgent::http_request_sync {method run_url path {body ""}} {
     variable request_timeout
 
-    set full_url [::LintAgent::url_join $run_url $path]
-    set headers [list Accept "application/json"]
-    set options [list -method $method -headers $headers -timeout $request_timeout]
-    if {$body ne ""} {
-        lappend options -type "application/json; charset=utf-8"
-        lappend options -query [encoding convertto utf-8 $body]
+    lassign [::LintAgent::parse_http_url $run_url $path] host port host_header request_path
+    set request [::LintAgent::http_build_request $method $host_header $request_path $body]
+
+    if {[catch {set sock [socket $host $port]} err]} {
+        error "HTTP $method $path failed: cannot connect to $host_header: $err"
     }
-    set token [http::geturl $full_url {*}$options]
-    set status [http::status $token]
-    set ncode [http::ncode $token]
-    set data [encoding convertfrom utf-8 [http::data $token]]
-    http::cleanup $token
-    if {$status ne "ok" || $ncode < 200 || $ncode >= 300} {
-        error "HTTP $method $path failed: status=$status code=$ncode body=$data"
+    fconfigure $sock -translation binary -encoding binary -buffering none
+    if {[catch {
+        puts -nonewline $sock $request
+        flush $sock
+    } err]} {
+        catch {close $sock}
+        error "HTTP $method $path failed: $err"
+    }
+
+    # ALINT-PRO Tcl exposes fileevent, but it is not reliable in alintcon batch
+    # execution. Mirror ocli_la.tcl: non-blocking reads plus update/after polling.
+    fconfigure $sock -blocking 0
+    set raw ""
+    set started [clock milliseconds]
+    while {1} {
+        if {[catch {set chunk [read $sock]} err]} {
+            catch {close $sock}
+            error "HTTP $method $path failed: $err"
+        }
+        if {$chunk ne ""} {
+            append raw $chunk
+        }
+        if {[::LintAgent::http_response_complete $raw]} {
+            break
+        }
+        if {[eof $sock]} {
+            break
+        }
+        if {[expr {[clock milliseconds] - $started}] > $request_timeout} {
+            catch {close $sock}
+            error "HTTP $method $path failed: request timed out"
+        }
+        catch {update}
+        after 10
+    }
+    close $sock
+
+    lassign [::LintAgent::http_parse_response $raw $method $path] ncode data status_line
+    if {$ncode < 200 || $ncode >= 300} {
+        error "HTTP $method $path failed: code=$ncode body=$data"
     }
     return $data
-}
-
-proc ::LintAgent::http_request_async {job_id method run_url path body} {
-    variable request_timeout
-
-    set full_url [::LintAgent::url_join $run_url $path]
-    set headers [list Accept "application/json"]
-    set options [list -method $method -headers $headers -timeout $request_timeout -command [list ::LintAgent::http_done $job_id]]
-    if {$body ne ""} {
-        lappend options -type "application/json; charset=utf-8"
-        lappend options -query [encoding convertto utf-8 $body]
-    }
-    return [http::geturl $full_url {*}$options]
 }
 
 proc ::LintAgent::json_skip_ws {json_var idx_var} {
@@ -540,26 +719,25 @@ proc ::LintAgent::start_prompt_job {prompt run_user run_url run_recursion {annou
     set jobs($job_id,output_label) $output_label
     set jobs($job_id,run_url) $run_url
 
-    if {[catch {set token [::LintAgent::http_request_async $job_id POST $run_url "/threads/$thread/runs/wait" $body]} err]} {
-        ::LintAgent::cleanup_job $job_id
-        error "failed to start lint-agent HTTP request: $err"
-    }
-    set jobs($job_id,token) $token
     if {$announce} {
-        puts "lint-agent job $job_id started: prompt"
+        puts "lint-agent request started: prompt"
         puts "thread_id: $thread"
     }
+
+    if {[catch {set data [::LintAgent::http_request_sync POST $run_url "/threads/$thread/runs/wait" $body]} err]} {
+        ::LintAgent::http_finish_job $job_id 0 "" $err
+        return $job_id
+    }
+    ::LintAgent::http_finish_job $job_id 200 $data ""
     return $job_id
 }
 
-proc ::LintAgent::http_done {job_id token} {
+proc ::LintAgent::http_finish_job {job_id ncode data error_text} {
     variable jobs
 
-    if {![info exists jobs($job_id,token)]} {
-        http::cleanup $token
+    if {![info exists jobs($job_id,thread_id)]} {
         return
     }
-
     set thread $jobs($job_id,thread_id)
     set announce $jobs($job_id,announce)
     set output_label $jobs($job_id,output_label)
@@ -568,19 +746,17 @@ proc ::LintAgent::http_done {job_id token} {
         set wait_var $jobs($job_id,wait_var)
     }
 
-    set status [http::status $token]
-    set ncode [http::ncode $token]
-    set data [encoding convertfrom utf-8 [http::data $token]]
-    set error_text [http::error $token]
-    http::cleanup $token
-
     puts ""
     if {$announce} {
-        puts "lint-agent job $job_id finished: prompt"
+        puts "lint-agent request finished: prompt"
         puts "thread_id: $thread"
     }
-    if {$status ne "ok" || $ncode < 200 || $ncode >= 300} {
-        puts "lint-agent failed: HTTP status=$status code=$ncode"
+    if {$error_text ne "" || $ncode < 200 || $ncode >= 300} {
+        if {$ncode > 0} {
+            puts "lint-agent failed: HTTP code=$ncode"
+        } else {
+            puts "lint-agent failed"
+        }
         if {$error_text ne ""} {
             puts $error_text
         }
@@ -614,16 +790,10 @@ proc ::LintAgent::cleanup_job {job_id} {
 }
 
 proc ::LintAgent::run_dialog_prompt {prompt auto_approve auto_reject run_user run_url run_recursion} {
-    variable jobs
-
     if {$auto_approve || $auto_reject} {
         puts "warning: Tcl HTTP client does not implement interactive HITL decisions; server-side approval should be disabled."
     }
-    set job_id [::LintAgent::start_prompt_job $prompt $run_user $run_url $run_recursion 0 "assistant"]
-    set wait_var "::LintAgent::dialog_done_$job_id"
-    set jobs($job_id,wait_var) $wait_var
-    vwait $wait_var
-    catch {unset $wait_var}
+    ::LintAgent::start_prompt_job $prompt $run_user $run_url $run_recursion 0 "assistant"
     return 0
 }
 
@@ -933,7 +1103,7 @@ proc ::LintAgent::call {args} {
     if {!$switch_current_thread} {
         set ::LintAgent::thread_id $old_thread
     }
-    return $job_id
+    return ""
 }
 
 proc ::LintAgent::run_repl_command {slash_command label} {
@@ -1081,28 +1251,10 @@ proc ::LintAgent::set_recursion_limit {args} {
     return [::LintAgent::set_recursion_limit]
 }
 
-proc ::LintAgent::jobs {} {
-    variable jobs
-
-    set ids {}
-    foreach key [array names jobs "*,token"] {
-        lappend ids [lindex [split $key ","] 0]
-    }
-    set ids [lsort -integer -unique $ids]
-    if {[llength $ids] == 0} {
-        puts "no lint-agent jobs running"
-        return ""
-    }
-    foreach job_id $ids {
-        puts "job $job_id kind=$jobs($job_id,kind) label=$jobs($job_id,label) thread=$jobs($job_id,thread_id)"
-    }
-    return ""
-}
-
 proc ::LintAgent::help {} {
     puts "lint-agent commands:"
     puts "  lint-agent                                  enter interactive dialogue mode"
-    puts "  lint-agent \"prompt\"                       run one non-blocking prompt on current thread"
+    puts "  lint-agent \"prompt\"                       run one prompt on current thread"
     puts "  lint-agent -new \"prompt\"                  start a new thread and send prompt"
     puts "  lint-agent -thread <uuid> \"prompt\"        send prompt to a specific thread"
     puts "  lint-agent-new                            switch to a new empty thread"
@@ -1115,7 +1267,6 @@ proc ::LintAgent::help {} {
     puts "  lint-agent-thread-info                    show thread metadata JSON"
     puts "  lint-agent-user ?user_id|-default?        show or set user_id"
     puts "  lint-agent-url ?url?                      show or set Agent Server URL"
-    puts "  lint-agent-jobs                           list running HTTP requests"
     return ""
 }
 
@@ -1138,7 +1289,6 @@ interp alias {} lint-agent-user {} ::LintAgent::user
 interp alias {} lint-agent-url {} ::LintAgent::set_url
 interp alias {} lint-agent-assistant-name {} ::LintAgent::set_assistant
 interp alias {} lint-agent-recursion-limit {} ::LintAgent::set_recursion_limit
-interp alias {} lint-agent-jobs {} ::LintAgent::jobs
 
 puts "lint-agent command registered. Use lint-agent-help for commands."
 puts "lint-agent thread_id: $::LintAgent::thread_id"

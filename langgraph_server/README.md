@@ -363,7 +363,7 @@ lint-agent --auto-reject "..."
 source D:/Downloads/alint-pro-customer/lint_agent/langgraph_server/lint_agent_alint_console.tcl
 ```
 
-如果安装目录不同，把路径替换为实际客户包路径。客户包里的 Tcl 包装直接通过 Tcl 标准 `http` 包调用 Docker 中的 LangGraph Server，不要求 EDA 工作站安装 Python、`langgraph-sdk` 或本项目 Python 依赖。
+如果安装目录不同，把路径替换为实际客户包路径。客户包里的 Tcl 包装直接通过 Tcl 核心 `socket` 命令调用 LangGraph Server，不依赖 Tcl `http` 包，也不要求 EDA 工作站安装 Python、`langgraph-sdk` 或本项目 Python 依赖。只要 `lint-agent-url` 指向可访问的 LangGraph Server，服务端是 Docker 启动还是 Windows 原生启动都兼容。
 
 ALINT-PRO Tcl console 的特点和 PowerShell/cmd 不同：
 
@@ -391,9 +391,9 @@ lint-agent> /thread
 lint-agent> /exit
 ```
 
-带 prompt 的 `lint-agent "..."` 仍是非阻塞一次性调用：命令会立刻返回 ALINT-PRO 的 `>` 提示符，Tcl 后台 HTTP 请求调用 `http://127.0.0.1:2024`，完成后再把结果打印回同一个 console。
+带 prompt 的 `lint-agent "..."` 使用 Tcl socket 非阻塞轮询调用 `http://127.0.0.1:2024`。它会先打印本轮请求，再等待本轮回答完成后返回；实现上不启动后台任务，这样可以保证同一条 thread 的消息顺序。
 
-裸 `lint-agent` 的每一轮对话也使用 Tcl 异步 HTTP 请求执行，Tcl 侧通过 `vwait` 等待本轮完成。这样用户输入会先立即显示为 `user: ...`，智能体回答会显示为 `assistant: ...`，ALINT-PRO 的 Tcl 事件循环仍可处理后台完成回调；为了保持同一条 thread 的消息顺序，下一轮输入会等当前回答结束后再出现提示符。
+裸 `lint-agent` 的每一轮对话也使用同一套 socket 轮询逻辑。用户输入会先立即显示为 `user: ...`，智能体回答显示为 `assistant: ...`；下一轮输入会等当前回答结束后再出现提示符。
 
 会话管理命令：
 
@@ -414,7 +414,6 @@ lint-agent> /exit
 | `lint-agent-schemas` | 查看 assistant schemas JSON，输出通常较长 |
 | `lint-agent-user ?user_id?` / `lint-agent-user -default` | 查看或设置传给 LangGraph Server 的 user_id |
 | `lint-agent-url ?url?` | 查看或设置 Agent Server URL |
-| `lint-agent-jobs` | 查看正在运行的后台任务 |
 
 示例：
 
