@@ -6,7 +6,7 @@
 
 - 在 LangGraph Agent Server 上用标准 HTTP API 运行 `lint` graph。
 - 在 PowerShell/cmd 中用 `lint-agent` 进行一次性提问或交互式持久对话。
-- 在 ALINT-PRO Tcl console 中通过非阻塞包装调用同一个 Agent Server。
+- 在 ALINT-PRO Tcl console 中通过 socket 轮询包装调用同一个 Agent Server。
 
 ## 当前实现
 
@@ -27,7 +27,7 @@ langgraph_server/
   langgraph.json                    # LangGraph Server 配置
   lint_agent_cli.py                 # CLI 客户端，调用 Agent Server
   lint-agent.cmd                    # Windows 命令入口
-  lint_agent_alint_console.tcl      # ALINT-PRO Tcl console 非阻塞包装
+  lint_agent_alint_console.tcl      # ALINT-PRO Tcl console socket 轮询包装
   start_langgraph_agent_server.cmd  # 本地启动脚本
 ```
 

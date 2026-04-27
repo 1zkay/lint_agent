@@ -23,8 +23,6 @@ namespace eval ::LintAgent {
     variable user_id ""
     variable recursion_limit "50"
     variable request_timeout 1200000
-    variable job_counter 0
-    variable jobs
 }
 
 catch {fconfigure stdin -encoding utf-8}
@@ -176,11 +174,6 @@ proc ::LintAgent::json_search_threads_payload {include_all limit} {
     append body "\"select\":\[\"thread_id\",\"created_at\",\"updated_at\",\"metadata\",\"status\"\]"
     append body "}"
     return $body
-}
-
-proc ::LintAgent::url_join {base path} {
-    set base [string trimright $base "/"]
-    return "$base$path"
 }
 
 proc ::LintAgent::parse_http_url {run_url path} {
@@ -702,50 +695,7 @@ proc ::LintAgent::ensure_remote_thread {thread run_user run_url} {
     }
 }
 
-proc ::LintAgent::start_prompt_job {prompt run_user run_url run_recursion {announce 1} {output_label ""}} {
-    variable job_counter
-    variable jobs
-
-    set thread [::LintAgent::ensure_thread]
-    ::LintAgent::ensure_remote_thread $thread $run_user $run_url
-    set body [::LintAgent::json_run_payload $thread $prompt $run_user $run_recursion]
-
-    incr job_counter
-    set job_id $job_counter
-    set jobs($job_id,thread_id) $thread
-    set jobs($job_id,kind) "prompt"
-    set jobs($job_id,label) "prompt"
-    set jobs($job_id,announce) $announce
-    set jobs($job_id,output_label) $output_label
-    set jobs($job_id,run_url) $run_url
-
-    if {$announce} {
-        puts "lint-agent request started: prompt"
-        puts "thread_id: $thread"
-    }
-
-    if {[catch {set data [::LintAgent::http_request_sync POST $run_url "/threads/$thread/runs/wait" $body]} err]} {
-        ::LintAgent::http_finish_job $job_id 0 "" $err
-        return $job_id
-    }
-    ::LintAgent::http_finish_job $job_id 200 $data ""
-    return $job_id
-}
-
-proc ::LintAgent::http_finish_job {job_id ncode data error_text} {
-    variable jobs
-
-    if {![info exists jobs($job_id,thread_id)]} {
-        return
-    }
-    set thread $jobs($job_id,thread_id)
-    set announce $jobs($job_id,announce)
-    set output_label $jobs($job_id,output_label)
-    set wait_var ""
-    if {[info exists jobs($job_id,wait_var)]} {
-        set wait_var $jobs($job_id,wait_var)
-    }
-
+proc ::LintAgent::print_prompt_response {thread announce output_label ncode data error_text} {
     puts ""
     if {$announce} {
         puts "lint-agent request finished: prompt"
@@ -774,27 +724,32 @@ proc ::LintAgent::http_finish_job {job_id ncode data error_text} {
             puts $data
         }
     }
-
-    ::LintAgent::cleanup_job $job_id
-    if {$wait_var ne ""} {
-        set $wait_var 1
-    }
 }
 
-proc ::LintAgent::cleanup_job {job_id} {
-    variable jobs
+proc ::LintAgent::run_prompt_request {prompt run_user run_url run_recursion {announce 1} {output_label ""}} {
+    set thread [::LintAgent::ensure_thread]
+    ::LintAgent::ensure_remote_thread $thread $run_user $run_url
+    set body [::LintAgent::json_run_payload $thread $prompt $run_user $run_recursion]
 
-    foreach key [array names jobs "$job_id,*"] {
-        unset jobs($key)
+    if {$announce} {
+        puts "lint-agent request started: prompt"
+        puts "thread_id: $thread"
     }
+
+    if {[catch {set data [::LintAgent::http_request_sync POST $run_url "/threads/$thread/runs/wait" $body]} err]} {
+        ::LintAgent::print_prompt_response $thread $announce $output_label 0 "" $err
+        return ""
+    }
+    ::LintAgent::print_prompt_response $thread $announce $output_label 200 $data ""
+    return ""
 }
 
 proc ::LintAgent::run_dialog_prompt {prompt auto_approve auto_reject run_user run_url run_recursion} {
     if {$auto_approve || $auto_reject} {
         puts "warning: Tcl HTTP client does not implement interactive HITL decisions; server-side approval should be disabled."
     }
-    ::LintAgent::start_prompt_job $prompt $run_user $run_url $run_recursion 0 "assistant"
-    return 0
+    ::LintAgent::run_prompt_request $prompt $run_user $run_url $run_recursion 0 "assistant"
+    return ""
 }
 
 proc ::LintAgent::parse_flags {arg_list} {
@@ -1099,7 +1054,7 @@ proc ::LintAgent::call {args} {
     lassign $resolved run_thread run_user run_url run_recursion
     set old_thread $::LintAgent::thread_id
     set ::LintAgent::thread_id $run_thread
-    set job_id [::LintAgent::start_prompt_job $prompt $run_user $run_url $run_recursion 1 ""]
+    ::LintAgent::run_prompt_request $prompt $run_user $run_url $run_recursion 1 ""
     if {!$switch_current_thread} {
         set ::LintAgent::thread_id $old_thread
     }
