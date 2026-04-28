@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import shutil
 import sys
-from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from deepagents.backends.filesystem import FilesystemBackend
@@ -26,10 +25,20 @@ from langchain.agents.middleware import (
 
 from config import config
 from agent_runtime.reflection import ReflectionMiddleware
+from workspace.host_paths import (
+    is_configured_container_host_path,
+    translate_posix_host_path_for_container,
+    translate_windows_host_path_for_container,
+)
+from workspace.path_resolver import (
+    is_path_under_project_root,
+    resolve_legacy_slash_project_path,
+)
 
 from .prompts import WRITE_TODOS_ENHANCED_PROMPT
 
 logger = logging.getLogger(__name__)
+_FILESYSTEM_ROOT_PATH: Path | None = None
 
 
 UNRESTRICTED_FILESYSTEM_SYSTEM_PROMPT = """## Following Conventions
@@ -40,8 +49,10 @@ UNRESTRICTED_FILESYSTEM_SYSTEM_PROMPT = """## Following Conventions
 ## Filesystem Tools `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`
 
 You have unrestricted local filesystem access through these tools.
-Use native paths exactly as provided by the user. On Windows, paths such as `D:\\project\\file.sv`, `C:\\Users\\name\\file.txt`, and UNC paths are valid. POSIX-style absolute paths and relative paths are also accepted; relative paths resolve from the agent repository root.
-When this agent runs in Docker, the container must bind-mount host paths for them to exist inside the runtime.
+Use native paths exactly as provided by the user. On Windows, paths such as `D:\\project\\file.sv`, `C:\\Users\\name\\file.txt`, and UNC paths are valid. POSIX-style absolute paths and project-relative paths are also accepted.
+Use project-relative paths for files inside the agent repository root: `.files/...` for uploaded files, `skills/...` for bundled skills, and `reports/...` for generated reports. Use `.` for the project root. Legacy tool paths with a leading slash, such as `/.files/...` or `/skills/...`, mean the same project-relative path with the leading slash removed; a bare `/` remains a native POSIX absolute path.
+When reading files referenced by a skill, resolve relative paths from that skill directory. For example, if a skill at `skills/example/SKILL.md` references `scripts/run.py`, read `skills/example/scripts/run.py`.
+When this agent runs in the customer Docker package with a platform override file, host paths are automatically mapped through the configured bind mount. For example, Windows `D:\\project\\file.sv` can resolve through `/host/d/project/file.sv`, and Linux `/home/user/project/top.sv` can resolve through `/host/root/home/user/project/top.sv`.
 
 - ls: list files in a directory
 - read_file: read a file from the filesystem
@@ -61,15 +72,31 @@ def _validate_unrestricted_filesystem_path(path: str, *, allowed_prefixes: Any =
         return "."
     if text.startswith("~"):
         text = os.path.expanduser(text)
-    if re.match(r"^[a-zA-Z]:[\\/]", text) or text.startswith("\\\\"):
-        return str(PureWindowsPath(text))
-    if PurePath(text).is_absolute() or text.startswith("/"):
-        return text
+    windows_path = PureWindowsPath(text)
+    if text.startswith("\\\\") or (windows_path.drive and windows_path.is_absolute()):
+        translated = translate_windows_host_path_for_container(text)
+        if translated != text:
+            return translated
+        return str(windows_path)
+    if text.startswith("/"):
+        root_path = _FILESYSTEM_ROOT_PATH
+        if root_path is not None and is_path_under_project_root(text, root_path):
+            return text.replace("\\", "/")
+        if is_configured_container_host_path(text):
+            return text
+        if root_path is not None:
+            project_path = resolve_legacy_slash_project_path(text, root_path)
+            if project_path is not None:
+                return str(project_path)
+        return translate_posix_host_path_for_container(text)
     return text.replace("\\", "/")
 
 
-def enable_unrestricted_deepagents_paths() -> None:
+def enable_unrestricted_deepagents_paths(root_path: str | Path) -> None:
     """Let DeepAgents file tools pass native OS paths through to the backend."""
+    global _FILESYSTEM_ROOT_PATH
+
+    _FILESYSTEM_ROOT_PATH = Path(root_path).resolve()
     deepagents_filesystem.validate_path = _validate_unrestricted_filesystem_path
 
 
@@ -145,7 +172,7 @@ def build_agent_middleware(
     """Build the shared LangChain/DeepAgents middleware stack."""
     root_path = Path(root_dir).resolve()
     middleware_stack: list[Any] = []
-    enable_unrestricted_deepagents_paths()
+    enable_unrestricted_deepagents_paths(root_path)
 
     if config.agent_enable_todo:
         middleware_stack.append(TodoListMiddleware(system_prompt=WRITE_TODOS_ENHANCED_PROMPT))

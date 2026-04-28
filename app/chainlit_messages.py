@@ -11,17 +11,9 @@ from chainlit.types import ThreadDict
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
+from workspace.path_resolver import to_project_relative_path
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-
-def to_project_virtual_path(path: Path) -> str | None:
-    """Convert a local path into the POSIX virtual path used by deepagents."""
-    resolved = path.resolve()
-    try:
-        relative_path = resolved.relative_to(PROJECT_ROOT)
-    except ValueError:
-        return None
-    return "/" if not relative_path.parts else "/" + relative_path.as_posix()
 
 
 def build_human_message_from_chainlit_message(message: cl.Message) -> HumanMessage:
@@ -49,9 +41,9 @@ def build_human_message_from_chainlit_message(message: cl.Message) -> HumanMessa
             continue
 
         abs_path = str(p.resolve())
-        tool_path = to_project_virtual_path(p)
+        tool_path = to_project_relative_path(p, PROJECT_ROOT)
         if tool_path:
-            attachment_notes.append(f"- `{name}`: use `{tool_path}` (mime={mime})")
+            attachment_notes.append(f"- `{name}`: use project-relative path `{tool_path}` (mime={mime})")
         else:
             attachment_notes.append(
                 f"- `{name}`: outside workspace ({abs_path}, mime={mime})"

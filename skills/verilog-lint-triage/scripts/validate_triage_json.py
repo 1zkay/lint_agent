@@ -13,7 +13,7 @@ ALLOWED_LINT_CATEGORIES = {"严重", "一般", "误报"}
 ALLOWED_MISSED_CATEGORIES = {"严重", "一般"}
 ALLOWED_STANDARD_CATEGORIES = {"严重", "一般", "提示"}
 DEFAULT_OUTPUT_PATTERN = re.compile(
-    r"^(?:/workspace[/\\])?reports[/\\]verilog_lint_triage_result_\d{8}_\d{6}\.json$"
+    r"^(?:(?:/workspace|/workspace/lint_agent)[/\\])?reports[/\\]verilog_lint_triage_result_\d{8}_\d{6}\.json$"
 )
 MISSED_DEFECT_ID_PATTERN = re.compile(r"^MISSED_\d{3}$")
 STANDARD_FINDING_ID_PATTERN = re.compile(r"^STD_\d{3}$")
@@ -434,10 +434,12 @@ def main() -> int:
             or output_path.startswith("reports\\")
             or output_path.startswith("/workspace/reports/")
             or output_path.startswith("/workspace/reports\\")
+            or output_path.startswith("/workspace/lint_agent/reports/")
+            or output_path.startswith("/workspace/lint_agent/reports\\")
         ):
             _expect(
                 bool(DEFAULT_OUTPUT_PATTERN.match(output_path)),
-                "summary.output_path must use the default timestamped form reports/verilog_lint_triage_result_YYYYMMDD_HHMMSS.json or /workspace/reports/verilog_lint_triage_result_YYYYMMDD_HHMMSS.json",
+                "summary.output_path must use the default timestamped form reports/verilog_lint_triage_result_YYYYMMDD_HHMMSS.json",
                 errors,
             )
 

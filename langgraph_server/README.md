@@ -114,6 +114,20 @@ docker compose logs -f langgraph-server
 
 Docker 只启动 Agent Server，不启动 ALINT-PRO/EDA 软件。用户需要在自己的 EDA Tcl console 中手动 source `lint_agent_alint_console.tcl`，再用 `lint-agent` 连接上述服务。
 
+默认 `docker-compose.yml` 不包含平台专属宿主机路径挂载，Windows Docker Desktop 和 Linux Docker 都可以直接启动。如果需要 Agent 直接读取宿主机绝对路径工程文件，请按平台叠加 override：
+
+```powershell
+# Windows Docker Desktop: C:/ -> /host/c, D:/ -> /host/d
+docker compose -f docker-compose.yml -f docker-compose.windows.yml up -d --build
+```
+
+```bash
+# Linux Docker: / -> /host/root
+docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d --build
+```
+
+Windows 路径示例：`D:\project\top.sv` 会映射为 `/host/d/project/top.sv`。Linux 路径示例：`/home/user/project/top.sv` 会映射为 `/host/root/home/user/project/top.sv`。如果 Linux 只想挂载工程根目录，可以设置 `ALINT_HOST_POSIX_SOURCE_ROOT=/home/user/project` 后再启动。
+
 ## 命令行使用
 
 Agent Server 启动后，在另一个 PowerShell 终端中调用：

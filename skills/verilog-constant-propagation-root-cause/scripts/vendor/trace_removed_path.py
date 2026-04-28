@@ -70,7 +70,8 @@ RTLIL_TO_SOURCE_PRIMITIVE = {
     "$xor": "xor",
 }
 
-DEFAULT_REPORT_ROOT = Path(r"D:\mcp\gate_error_reports")
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_REPORT_ROOT = PROJECT_ROOT / "reports" / "gate_error_reports"
 SIMPLE_CONNECTION_EXPR_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_$]*)(\[\d+\])?\s*$")
 SIMPLE_SIGNAL_REF_RE = re.compile(
     r"^\s*([A-Za-z_][A-Za-z0-9_$]*)(?:\[(\d+)(?::(\d+))?\])?\s*$"

@@ -30,7 +30,7 @@
 - 对涉及 Xilinx / Vivado 综合行为、属性、约束、综合策略或工具限制的问题，智能体会自动查询内置的 `vivado-synthesis.pdf` 参考文档，并给出页码依据。
 - 诊断文本内容为中文。
 - 默认输出为 JSON，不输出 Markdown 报告。
-- 默认结果目录是 `reports`，也就是当前项目下的 `D:\mcp\lint_agent\reports`。
+- 默认结果目录是项目根目录下的 `reports`，在 Docker 客户包中会持久化到 `customer-data/reports`。
 
 ## 示例指令
 
