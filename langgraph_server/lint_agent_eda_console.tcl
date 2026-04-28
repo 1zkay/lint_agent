@@ -1,12 +1,13 @@
-# Register lint-agent commands for the ALINT-PRO Tcl console.
+# Register lint-agent commands for an EDA Tcl console.
 #
-# Load once in ALINT-PRO console:
-#   source D:/Downloads/alint-pro-customer/lint_agent/langgraph_server/lint_agent_alint_console.tcl
+# Load once in the EDA Tcl console:
+#   source D:/Downloads/alint-pro-customer/lint_agent/langgraph_server/lint_agent_eda_console.tcl
 #
-# This wrapper talks directly to a LangGraph Agent Server over HTTP. It uses
-# only Tcl core socket commands because ALINT-PRO Tcl does not provide a
-# complete Tcllib http package. It does not require Python, langgraph-sdk, or
-# the Python CLI on the EDA workstation.
+# This wrapper talks directly to a LangGraph Agent Server over HTTP. It uses a
+# complete Tcllib http::geturl client when available, and falls back to Tcl core
+# socket commands in ALINT-PRO Tcl environments that provide no complete http
+# package. It does not require Python, langgraph-sdk, or the Python CLI on the
+# EDA workstation.
 
 namespace eval ::LintAgent {
     if {[info exists ::env(LANGGRAPH_URL)] && [string trim $::env(LANGGRAPH_URL)] ne ""} {
@@ -23,6 +24,7 @@ namespace eval ::LintAgent {
     variable user_id ""
     variable recursion_limit "50"
     variable request_timeout 1200000
+    variable http_geturl_available ""
 }
 
 catch {fconfigure stdin -encoding utf-8}
@@ -200,6 +202,66 @@ proc ::LintAgent::parse_http_url {run_url path} {
     return [list $host $port $host_header $request_path]
 }
 
+proc ::LintAgent::has_tcllib_http_geturl {} {
+    variable http_geturl_available
+
+    if {$http_geturl_available ne ""} {
+        return $http_geturl_available
+    }
+    if {[catch {package require http}]} {
+        set http_geturl_available 0
+    } else {
+        set http_geturl_available 1
+        foreach command {http::geturl http::status http::ncode http::data http::error http::cleanup} {
+            if {[llength [info commands $command]] == 0} {
+                set http_geturl_available 0
+                break
+            }
+        }
+    }
+    return $http_geturl_available
+}
+
+proc ::LintAgent::http_request_tcllib_sync {method run_url path {body ""}} {
+    variable request_timeout
+
+    lassign [::LintAgent::parse_http_url $run_url $path] host port host_header request_path
+    set request_url "http://$host_header$request_path"
+    set normalized_method [string toupper $method]
+    set options [list -headers [list Accept application/json] -timeout $request_timeout]
+    if {$body ne ""} {
+        lappend options -type "application/json; charset=utf-8"
+        lappend options -query [encoding convertto utf-8 $body]
+    } elseif {$normalized_method ne "GET"} {
+        lappend options -method $normalized_method
+    }
+
+    set token ""
+    if {[catch {set token [http::geturl $request_url {*}$options]} err]} {
+        if {$token ne ""} {
+            catch {http::cleanup $token}
+        }
+        error "HTTP $method $path failed: $err"
+    }
+
+    set status [http::status $token]
+    set ncode [http::ncode $token]
+    set data [http::data $token]
+    set err_text [http::error $token]
+    http::cleanup $token
+
+    if {$status ne "ok"} {
+        if {$err_text ne ""} {
+            error "HTTP $method $path failed: status=$status error=$err_text"
+        }
+        error "HTTP $method $path failed: status=$status"
+    }
+    if {$ncode < 200 || $ncode >= 300} {
+        error "HTTP $method $path failed: code=$ncode body=$data"
+    }
+    return $data
+}
+
 proc ::LintAgent::http_build_request {method host_header request_path body} {
     set body_bytes ""
     if {$body ne ""} {
@@ -337,7 +399,7 @@ proc ::LintAgent::http_response_complete {raw} {
     return 0
 }
 
-proc ::LintAgent::http_request_sync {method run_url path {body ""}} {
+proc ::LintAgent::http_request_socket_sync {method run_url path {body ""}} {
     variable request_timeout
 
     lassign [::LintAgent::parse_http_url $run_url $path] host port host_header request_path
@@ -388,6 +450,13 @@ proc ::LintAgent::http_request_sync {method run_url path {body ""}} {
         error "HTTP $method $path failed: code=$ncode body=$data"
     }
     return $data
+}
+
+proc ::LintAgent::http_request_sync {method run_url path {body ""}} {
+    if {[::LintAgent::has_tcllib_http_geturl]} {
+        return [::LintAgent::http_request_tcllib_sync $method $run_url $path $body]
+    }
+    return [::LintAgent::http_request_socket_sync $method $run_url $path $body]
 }
 
 proc ::LintAgent::json_skip_ws {json_var idx_var} {

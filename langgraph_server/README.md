@@ -6,7 +6,7 @@
 
 - 在 LangGraph Agent Server 上用标准 HTTP API 运行 `lint` graph。
 - 在 PowerShell/cmd 中用 `lint-agent` 进行一次性提问或交互式持久对话。
-- 在 ALINT-PRO Tcl console 中通过 socket 轮询包装调用同一个 Agent Server。
+- 在 ALINT-PRO Tcl console 中通过 Tcl HTTP 包装调用同一个 Agent Server。
 
 ## 当前实现
 
@@ -27,7 +27,7 @@ langgraph_server/
   langgraph.json                    # LangGraph Server 配置
   lint_agent_cli.py                 # CLI 客户端，调用 Agent Server
   lint-agent.cmd                    # Windows 命令入口
-  lint_agent_alint_console.tcl      # ALINT-PRO Tcl console socket 轮询包装
+  lint_agent_eda_console.tcl        # EDA Tcl console HTTP 包装
   start_langgraph_agent_server.cmd  # 本地启动脚本
 ```
 
@@ -112,7 +112,7 @@ docker compose ps langgraph-server
 docker compose logs -f langgraph-server
 ```
 
-Docker 只启动 Agent Server，不启动 ALINT-PRO/EDA 软件。用户需要在自己的 EDA Tcl console 中手动 source `lint_agent_alint_console.tcl`，再用 `lint-agent` 连接上述服务。
+Docker 只启动 Agent Server，不启动 ALINT-PRO/EDA 软件。用户需要在自己的 EDA Tcl console 中手动 source `lint_agent_eda_console.tcl`，再用 `lint-agent` 连接上述服务。
 
 默认 `docker-compose.yml` 不包含平台专属宿主机路径挂载，Windows Docker Desktop 和 Linux Docker 都可以直接启动。如果需要 Agent 直接读取宿主机绝对路径工程文件，请按平台叠加 override：
 
@@ -374,10 +374,10 @@ lint-agent --auto-reject "..."
 在 ALINT-PRO console 中先加载 Tcl 包装：
 
 ```tcl
-source D:/Downloads/alint-pro-customer/lint_agent/langgraph_server/lint_agent_alint_console.tcl
+source D:/Downloads/alint-pro-customer/lint_agent/langgraph_server/lint_agent_eda_console.tcl
 ```
 
-如果安装目录不同，把路径替换为实际客户包路径。客户包里的 Tcl 包装直接通过 Tcl 核心 `socket` 命令调用 LangGraph Server，不依赖 Tcl `http` 包，也不要求 EDA 工作站安装 Python、`langgraph-sdk` 或本项目 Python 依赖。只要 `lint-agent-url` 指向可访问的 LangGraph Server，服务端是 Docker 启动还是 Windows 原生启动都兼容。
+如果安装目录不同，把路径替换为实际客户包路径。客户包里的 Tcl 包装会优先使用完整 Tcllib `http::geturl` 客户端；如果 EDA Tcl 只提供不完整 `http` 包，则自动回退到 Tcl 核心 `socket` 实现的 HTTP/1.1 客户端。它不要求 EDA 工作站安装 Python、`langgraph-sdk` 或本项目 Python 依赖。只要 `lint-agent-url` 指向可访问的 LangGraph Server，服务端是 Docker 启动还是 Windows 原生启动都兼容。当前包装只支持 plain HTTP；如需 HTTPS，应在外部网关完成 TLS 终止。
 
 ALINT-PRO Tcl console 的特点和 PowerShell/cmd 不同：
 
@@ -405,9 +405,9 @@ lint-agent> /thread
 lint-agent> /exit
 ```
 
-带 prompt 的 `lint-agent "..."` 使用 Tcl socket 非阻塞轮询调用 `http://127.0.0.1:2024`。它会先打印本轮请求，再等待本轮回答完成后返回；实现上不会并发执行请求，这样可以保证同一条 thread 的消息顺序。
+带 prompt 的 `lint-agent "..."` 使用 Tcl HTTP 客户端调用 `http://127.0.0.1:2024`。如果当前 Tcl 环境有完整 `http::geturl`，优先使用它；否则使用内置 socket fallback。它会先打印本轮请求，再等待本轮回答完成后返回；实现上不会并发执行请求，这样可以保证同一条 thread 的消息顺序。
 
-裸 `lint-agent` 的每一轮对话也使用同一套 socket 轮询逻辑。用户输入会先立即显示为 `user: ...`，智能体回答显示为 `assistant: ...`；下一轮输入会等当前回答结束后再出现提示符。
+裸 `lint-agent` 的每一轮对话也使用同一套 HTTP 调用逻辑。用户输入会先立即显示为 `user: ...`，智能体回答显示为 `assistant: ...`；下一轮输入会等当前回答结束后再出现提示符。
 
 会话管理命令：
 
