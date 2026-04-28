@@ -22,7 +22,7 @@ namespace eval ::LintAgent {
     }
     variable thread_id ""
     variable user_id ""
-    variable recursion_limit "50"
+    variable recursion_limit "1000"
     variable request_timeout 1200000
     variable http_geturl_available ""
 }
