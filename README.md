@@ -55,16 +55,16 @@ LangGraph lint tool workflow
 
 ## Main Entry Points
 
-| Entry | File | Purpose |
-| --- | --- | --- |
-| Chainlit app | `chat_app.py` | Chainlit compatibility entrypoint and message streaming handler |
-| MCP server | `mcp_server/server.py` | FastMCP server assembly |
-| MCP implementation | `mcp_server/` | Exposes EDA tools, resources, and prompts |
-| LangGraph workflow | workflow graph | Deterministic lint tool analysis pipeline |
-| Yosys backend | `eda/ast.py` | AST, RTLIL, CFG/DDG/DFG, and netlist generation |
-| Agentic RAG | `rag/hardware_reference.py` | Reference-document retrieval and answer generation |
-| Long-term memory | `memory/long_term.py` | User profile and durable memory tools |
-| LangGraph Agent Server | `langgraph_server/agent_runtime.py` | Alternative HTTP/CLI agent runtime |
+| Entry                  | File                                  | Purpose                                                         |
+| ---------------------- | ------------------------------------- | --------------------------------------------------------------- |
+| Chainlit app           | `chat_app.py`                       | Chainlit compatibility entrypoint and message streaming handler |
+| MCP server             | `mcp_server/server.py`              | FastMCP server assembly                                         |
+| MCP implementation     | `mcp_server/`                       | Exposes EDA tools, resources, and prompts                       |
+| LangGraph workflow     | workflow graph                        | Deterministic lint tool analysis pipeline                       |
+| Yosys backend          | `eda/ast.py`                        | AST, RTLIL, CFG/DDG/DFG, and netlist generation                 |
+| Agentic RAG            | `rag/hardware_reference.py`         | Reference-document retrieval and answer generation              |
+| Long-term memory       | `memory/long_term.py`               | User profile and durable memory tools                           |
+| LangGraph Agent Server | `langgraph_server/agent_runtime.py` | Alternative HTTP/CLI agent runtime                              |
 
 ## Requirements
 
@@ -121,8 +121,7 @@ includes UI-related dependencies.
 Prebuilt customer Docker images are available from Baidu Netdisk:
 
 ```text
-[Download from Baidu Netdisk](https://pan.baidu.com/s/1K_PDZEaptrb7FwTOaQS7QA?pwd=w8h4)
-Extraction code: f6r8
+[Download from Baidu Netdisk](https://pan.baidu.com/s/1-qYLVNn0z8WIN0KYGV78DA?pwd=p1q2)
 ```
 
 These images can run the packaged Chainlit agent without requiring local Python
@@ -145,12 +144,12 @@ The `.env` file is ignored by Git and should not be committed.
 
 Persistence initialization in this project has four parts:
 
-| Purpose | Configuration | Initialization entry point | Tables |
-| --- | --- | --- | --- |
-| LangGraph checkpointer | `CHECKPOINTER_BACKEND`, `CHECKPOINTER_DB_URI`, `CHECKPOINTER_AUTO_SETUP` | `agent_runtime/checkpointer.py::build_checkpointer()` creates `AsyncPostgresSaver` and calls `checkpointer.setup()` at startup | `checkpoint_migrations`, `checkpoints`, `checkpoint_blobs`, `checkpoint_writes` |
-| Long-term memory store | `MEMORY_STORE_BACKEND`, `MEMORY_STORE_DB_URI`, `MEMORY_STORE_AUTO_SETUP`, `MEMORY_ENABLE_SEMANTIC_SEARCH` | `memory/long_term.py::build_memory_store()` creates `AsyncPostgresStore` and calls `store.setup()` at startup | `store_migrations`, `store`; when semantic search is enabled, it also creates `vector_migrations`, `store_vectors`, and the `vector` extension |
-| Chainlit thread history data layer | `DATABASE_URL`, `CHAINLIT_ENABLE_PASSWORD_AUTH`, `CHAINLIT_AUTH_SECRET` | `app/chainlit_data.py` registers `AppChainlitDataLayer` through `@cl.data_layer`; the Python runtime only connects to the database and does not run Prisma migrations automatically | `User`, `Thread`, `Step`, `Element`, `Feedback`, `StepType`, created by the Prisma migrations in `chainlit-datalayer` |
-| Chainlit attachment object storage | `BUCKET_NAME`, `APP_AWS_*`, `DEV_AWS_ENDPOINT`, `LOCAL_MINIO_*` | `app/chainlit_data.py::_build_chainlit_storage_client()` creates `S3StorageClient`; local MinIO can be started automatically from environment variables | File objects are stored in MinIO/S3; PostgreSQL stores only metadata such as `Element.objectKey` |
+| Purpose                            | Configuration                                                                                                     | Initialization entry point                                                                                                                                                                | Tables                                                                                                                                                   |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| LangGraph checkpointer             | `CHECKPOINTER_BACKEND`, `CHECKPOINTER_DB_URI`, `CHECKPOINTER_AUTO_SETUP`                                    | `agent_runtime/checkpointer.py::build_checkpointer()` creates `AsyncPostgresSaver` and calls `checkpointer.setup()` at startup                                                      | `checkpoint_migrations`, `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`                                                                  |
+| Long-term memory store             | `MEMORY_STORE_BACKEND`, `MEMORY_STORE_DB_URI`, `MEMORY_STORE_AUTO_SETUP`, `MEMORY_ENABLE_SEMANTIC_SEARCH` | `memory/long_term.py::build_memory_store()` creates `AsyncPostgresStore` and calls `store.setup()` at startup                                                                       | `store_migrations`, `store`; when semantic search is enabled, it also creates `vector_migrations`, `store_vectors`, and the `vector` extension |
+| Chainlit thread history data layer | `DATABASE_URL`, `CHAINLIT_ENABLE_PASSWORD_AUTH`, `CHAINLIT_AUTH_SECRET`                                     | `app/chainlit_data.py` registers `AppChainlitDataLayer` through `@cl.data_layer`; the Python runtime only connects to the database and does not run Prisma migrations automatically | `User`, `Thread`, `Step`, `Element`, `Feedback`, `StepType`, created by the Prisma migrations in `chainlit-datalayer`                      |
+| Chainlit attachment object storage | `BUCKET_NAME`, `APP_AWS_*`, `DEV_AWS_ENDPOINT`, `LOCAL_MINIO_*`                                           | `app/chainlit_data.py::_build_chainlit_storage_client()` creates `S3StorageClient`; local MinIO can be started automatically from environment variables                               | File objects are stored in MinIO/S3; PostgreSQL stores only metadata such as `Element.objectKey`                                                       |
 
 The two LangGraph table groups can be created automatically when Chainlit starts. Chainlit thread history tables must be created ahead of time by running the `chainlit-datalayer` Prisma migrations. MinIO only stores attachment objects and does not create database tables.
 
@@ -259,24 +258,24 @@ For details, see `langgraph_server/README.md`.
 
 `mcp_server/server.py` exposes the following main MCP tools:
 
-| Tool | Purpose |
-| --- | --- |
+| Tool                                 | Purpose                                                                             |
+| ------------------------------------ | ----------------------------------------------------------------------------------- |
 | `generate_basic_analysis_workflow` | Run the full lint tool + Yosys + source extraction + artifact organization workflow |
-| lint analysis tool | Run the lint tool only and generate a CSV report |
-| `analyze_verilog_structure` | Run Yosys structure analysis only |
-| `export_verilog_netlist` | Export synthesized Verilog and JSON netlists |
-| `convert_copilot_json_to_csv` | Convert JSON diagnosis output to CSV |
-| `save_user_feedback` | Save user feedback to a JSON file |
+| lint analysis tool                   | Run the lint tool only and generate a CSV report                                    |
+| `analyze_verilog_structure`        | Run Yosys structure analysis only                                                   |
+| `export_verilog_netlist`           | Export synthesized Verilog and JSON netlists                                        |
+| `convert_copilot_json_to_csv`      | Convert JSON diagnosis output to CSV                                                |
+| `save_user_feedback`               | Save user feedback to a JSON file                                                   |
 
 It also exposes these read-only resources after a workflow run:
 
-| URI | Content |
-| --- | --- |
-| `lint-tool://basic/sources` | Source code with line numbers |
-| `lint-tool://basic/violations` | lint tool violation CSV |
-| `lint-tool://basic/ast` | AST JSON |
-| `lint-tool://basic/cfg_ddg_dfg` | CFG/DDG/DFG JSON |
-| `lint-tool://basic/kb` | Self-built Verilog knowledge base |
+| URI                               | Content                           |
+| --------------------------------- | --------------------------------- |
+| `lint-tool://basic/sources`     | Source code with line numbers     |
+| `lint-tool://basic/violations`  | lint tool violation CSV           |
+| `lint-tool://basic/ast`         | AST JSON                          |
+| `lint-tool://basic/cfg_ddg_dfg` | CFG/DDG/DFG JSON                  |
+| `lint-tool://basic/kb`          | Self-built Verilog knowledge base |
 
 ## Typical Diagnosis Flow
 
