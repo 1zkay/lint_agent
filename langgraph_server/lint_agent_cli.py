@@ -42,7 +42,12 @@ def _message_text(message: Any) -> str:
 
 
 def _last_ai_text(state: Any) -> str:
-    messages = _field(state, "messages", [])
+    messages = _field(state, "messages", None)
+    if not isinstance(messages, list) or not messages:
+        values = _field(state, "values", {}) or {}
+        nested_messages = values.get("messages", []) if isinstance(values, dict) else _field(values, "messages", [])
+        if isinstance(nested_messages, list):
+            messages = nested_messages
     if not isinstance(messages, list):
         return ""
     for message in reversed(messages):
@@ -633,8 +638,9 @@ def _run_wait(client: Any, args: argparse.Namespace, prompt: str, context: dict[
             print(text)
             return 0
 
+        print("lint-agent did not receive an assistant message; raw state follows:", file=sys.stderr)
         print(_json_text(state))
-    return 1
+        return 1
 
 
 def _handle_slash_command(

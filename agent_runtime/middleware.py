@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import sys
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from deepagents.backends.filesystem import FilesystemBackend
+from deepagents.middleware import filesystem as deepagents_filesystem
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from langchain.agents.middleware import (
@@ -28,6 +30,47 @@ from agent_runtime.reflection import ReflectionMiddleware
 from .prompts import WRITE_TODOS_ENHANCED_PROMPT
 
 logger = logging.getLogger(__name__)
+
+
+UNRESTRICTED_FILESYSTEM_SYSTEM_PROMPT = """## Following Conventions
+
+- Read files before editing; understand existing content before making changes.
+- Mimic existing style, naming conventions, and patterns.
+
+## Filesystem Tools `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`
+
+You have unrestricted local filesystem access through these tools.
+Use native paths exactly as provided by the user. On Windows, paths such as `D:\\project\\file.sv`, `C:\\Users\\name\\file.txt`, and UNC paths are valid. POSIX-style absolute paths and relative paths are also accepted; relative paths resolve from the agent repository root.
+When this agent runs in Docker, the container must bind-mount host paths for them to exist inside the runtime.
+
+- ls: list files in a directory
+- read_file: read a file from the filesystem
+- write_file: write to a new file in the filesystem
+- edit_file: edit a file in the filesystem
+- glob: find files matching a pattern, optionally under a native path
+- grep: search for text within files
+
+Use pagination with offset/limit when reading large files.
+"""
+
+
+def _validate_unrestricted_filesystem_path(path: str, *, allowed_prefixes: Any = None) -> str:
+    """Accept native absolute paths for trusted local agent deployments."""
+    text = str(path or "").strip()
+    if not text:
+        return "."
+    if text.startswith("~"):
+        text = os.path.expanduser(text)
+    if re.match(r"^[a-zA-Z]:[\\/]", text) or text.startswith("\\\\"):
+        return str(PureWindowsPath(text))
+    if PurePath(text).is_absolute() or text.startswith("/"):
+        return text
+    return text.replace("\\", "/")
+
+
+def enable_unrestricted_deepagents_paths() -> None:
+    """Let DeepAgents file tools pass native OS paths through to the backend."""
+    deepagents_filesystem.validate_path = _validate_unrestricted_filesystem_path
 
 
 def build_tool_approval_middleware() -> tuple[list[Any], list[str]]:
@@ -102,6 +145,7 @@ def build_agent_middleware(
     """Build the shared LangChain/DeepAgents middleware stack."""
     root_path = Path(root_dir).resolve()
     middleware_stack: list[Any] = []
+    enable_unrestricted_deepagents_paths()
 
     if config.agent_enable_todo:
         middleware_stack.append(TodoListMiddleware(system_prompt=WRITE_TODOS_ENHANCED_PROMPT))
@@ -128,11 +172,12 @@ def build_agent_middleware(
         FilesystemMiddleware(
             backend=FilesystemBackend(
                 root_dir=str(root_path),
-                virtual_mode=True,
-            )
+                virtual_mode=False,
+            ),
+            system_prompt=UNRESTRICTED_FILESYSTEM_SYSTEM_PROMPT,
         )
     )
-    logger.info("%s FilesystemMiddleware enabled (root_dir=%s, virtual_mode=True)", log_prefix, root_path)
+    logger.info("%s FilesystemMiddleware enabled (root_dir=%s, virtual_mode=False, unrestricted paths)", log_prefix, root_path)
 
     if config.agent_enable_summarization:
         middleware_stack.append(
