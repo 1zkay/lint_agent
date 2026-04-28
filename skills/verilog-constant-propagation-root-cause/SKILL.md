@@ -1,10 +1,10 @@
 ---
 name: verilog-constant-propagation-root-cause
-description: Use this skill when the user provides Verilog/SystemVerilog source files or a source directory plus a top module, and wants to detect hierarchical constant-propagation defects caused by parent-module constant pins or named wires that pollute child-module inputs, internal wires, and outputs across multiple levels, using the bundled trace_removed_path.py engine and then separating likely real defects from design-intended constants.
+description: Use this skill when the user provides Verilog/SystemVerilog source files or a source directory plus a top module, and wants a concise Chinese JSON diagnosis for hierarchical constant-propagation defects caused by parent-module constant pins or named wires that pollute child-module inputs, internal wires, and outputs across multiple levels, using the bundled trace_removed_path.py engine and then separating likely real defects from design-intended constants.
 license: MIT
 metadata:
   author: zk
-  version: "1.2"
+  version: "1.3"
 ---
 
 # Verilog Constant Propagation Root Cause
@@ -16,6 +16,7 @@ metadata:
 - The user wants to find constant-propagation defects across hierarchy, not just top-level constant outputs.
 - The user cares about the earliest parent-module named root and the downstream polluted signal set.
 - The user wants help deciding whether the detected roots are likely real defects or design-intended constants.
+- The user wants the final diagnosis saved as a concise Chinese JSON report.
 
 ## Required Inputs
 
@@ -84,16 +85,60 @@ python skills/verilog-constant-propagation-root-cause/scripts/run_constant_trace
   - source files around the root and the polluted modules
 - A result is not complete until the agent checks whether the removed logic seen in RTLIL matches the root and the source-level intent.
 
-### 6. Final response shape
+### 6. Write the final Chinese JSON diagnosis
 
-- Start with findings, not a broad summary.
-- For each likely real defect, report:
-  - the parent-module named root,
-  - affected child modules,
-  - representative removed cells or polluted signals,
-  - why it is likely unintended,
-  - residual uncertainty if any.
-- If no likely real defect is found, say that explicitly and explain that the current hits look like design-intended constants.
+- Write the final diagnosis to the report directory printed by the wrapper:
+
+```text
+<REPORT_DIR>/constant_propagation_diagnosis.json
+```
+
+- The final assistant response should be brief and in Chinese: state the JSON report path and the number of likely real defects. Do not duplicate the full report in prose unless the user asks.
+- The JSON report must contain only core content:
+
+```json
+{
+  "summary": {
+    "top_module": "top",
+    "input_paths": ["rtl"],
+    "artifact_dir": "reports/constant_propagation_20260428_153000",
+    "real_defect_count": 1,
+    "intended_constant_count": 2,
+    "output_path": "reports/constant_propagation_20260428_153000/constant_propagation_diagnosis.json"
+  },
+  "findings": [
+    {
+      "id": "CP_001",
+      "category": "疑似真实缺陷",
+      "root_signal": "parent_cfg_force_zero",
+      "root_module": "top",
+      "affected_modules": ["u_child"],
+      "polluted_signals": ["valid_i", "enable_i"],
+      "removed_logic": ["u_child.$procmux$12"],
+      "evidence": {
+        "report_item": "trace_removed_path_report.json 中对应根源和删除项",
+        "rtlil_evidence": "raw_proc.il 中存在相关逻辑，opt_proc.il 中被删除",
+        "source_evidence": "源码中该控制信号被上层常量连接，未看到明确配置意图"
+      },
+      "diagnosis": "上层常量连接污染子模块控制路径，导致下游逻辑被优化删除，疑似非预期常量传播。",
+      "confirmation_needed": [
+        "确认该控制信号是否本应固定为常量。"
+      ]
+    }
+  ]
+}
+```
+
+Field rules:
+
+- Keep JSON keys stable in English, but write all diagnosis text in Chinese.
+- `summary` must contain only top module, inputs, artifact directory, counts, and output path.
+- `findings` must contain only likely real defects or clearly important intended constants.
+- Use `category` values `疑似真实缺陷` or `设计预期常量`.
+- `diagnosis` must be concise and evidence-based.
+- `evidence` must cite only facts from `trace_removed_path_report.json`, `raw_proc.il`, `opt_proc.il`, and source code.
+- Do not include broad RTL optimization background or generic constant-propagation explanation.
+- If no likely real defect is found, write `"findings": []` and set `real_defect_count` to `0`.
 
 ## Guardrails
 
