@@ -4,7 +4,7 @@ ALINT-PRO 全局配置（唯一入口）
 所有可配置项统一在此管理；其他模块（chat_app / mcp_server 等）一律通过
 ``from config import config`` 访问，禁止自行调用 os.getenv。
 
-优先级（由低到高）：类内默认值 → .env 文件 → 系统环境变量
+优先级（由低到高）：类内默认值 → 镜像内置 .env 文件 → 容器 env_file / 系统环境变量
 """
 import os
 import re
@@ -233,6 +233,13 @@ class Config:
         self.agent_skills_dirs = [
             d.strip() for d in os.getenv("AGENT_SKILLS_DIRS", "").split(",") if d.strip()
         ]
+        for extra_dir in [
+            d.strip()
+            for d in os.getenv("AGENT_EXTRA_SKILLS_DIRS", "customer_skills").split(",")
+            if d.strip()
+        ]:
+            if extra_dir not in self.agent_skills_dirs:
+                self.agent_skills_dirs.append(extra_dir)
         self.agent_tool_approval_enabled = self._bool_env("AGENT_TOOL_APPROVAL_ENABLED", "true")
         self.agent_approval_tool_names: tuple[str, ...] = (
             "write_file", "edit_file", "shell"

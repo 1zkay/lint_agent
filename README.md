@@ -364,7 +364,12 @@ Enable skill loading with:
 ```env
 AGENT_ENABLE_SKILLS=true
 AGENT_SKILLS_DIRS=skills
+AGENT_EXTRA_SKILLS_DIRS=customer_skills
 ```
+
+In Docker packages, `./customer-config/skills` is mounted to
+`customer_skills`, so customers can add `skill-name/SKILL.md` directories
+without rebuilding the image.
 
 ## Generated Files and Git Policy
 
