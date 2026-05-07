@@ -121,7 +121,7 @@ includes UI-related dependencies.
 Prebuilt customer Docker images are available from Baidu Netdisk:
 
 ```text
-[Download from Baidu Netdisk](https://pan.baidu.com/s/1-qYLVNn0z8WIN0KYGV78DA?pwd=p1q2)
+[Download from Baidu Netdisk](https://pan.baidu.com/s/1u5cFMbIxI35MMeZvWIwy_g?pwd=s7b9)
 ```
 
 These images can run the packaged Chainlit agent without requiring local Python
