@@ -439,7 +439,7 @@ class HardwareReferenceAgenticRAGService:
     def _build_graph(self):
         @tool("retrieve_hardware_reference_context")
         async def retrieve_hardware_reference_context(query: str) -> str:
-            """Search the built-in hardware reference PDFs for IEEE language or Vivado synthesis context."""
+            """Search the built-in hardware reference PDFs for IEEE language context."""
 
             payload = await self._retrieve_context_payload(query)
             return json.dumps(payload, ensure_ascii=False)
@@ -450,11 +450,10 @@ class HardwareReferenceAgenticRAGService:
             system_message = SystemMessage(
                 content=(
                     "You are a hardware design reference assistant. "
-                    "The built-in hardware reference collection currently includes the IEEE standard "
-                    "and Vivado synthesis documentation. "
+                    "The built-in hardware reference collection currently includes IEEE standard documentation. "
                     "Prefer using the retriever tool for legacy Verilog constructs, SystemVerilog language "
-                    "rules, and Xilinx/Vivado synthesis behavior, coding style, attributes, or lint-diagnosis "
-                    "questions. Only answer directly if retrieval is clearly unnecessary."
+                    "rules, and lint-diagnosis questions that depend on IEEE language semantics. "
+                    "Only answer directly if retrieval is clearly unnecessary."
                 )
             )
             response = await (
@@ -507,8 +506,8 @@ class HardwareReferenceAgenticRAGService:
         async def rewrite_question(state: PdfAgenticRagState):
             question = str(state["messages"][0].content)
             prompt = (
-                "请改写下面这个关于 Verilog/SystemVerilog 语言规则或 Vivado 综合行为的问题，"
-                "让它更适合做语义检索。保留关键信号、语法构造、综合现象、工具关键词、"
+                "请改写下面这个关于 Verilog/SystemVerilog 语言规则的问题，"
+                "让它更适合做语义检索。保留关键信号、语法构造、标准语义、"
                 "告警现象和代码上下文。只输出改写后的单句查询。\n\n"
                 f"原始问题：\n{question}"
             )
@@ -528,14 +527,12 @@ class HardwareReferenceAgenticRAGService:
             )
             context_json = str(tool_message.content) if tool_message else '{"results":[]}'
             prompt = (
-                "你是 Verilog / SystemVerilog / 硬件综合参考文档问答助手。"
-                "知识库同时覆盖 IEEE 标准和 Vivado 综合文档。"
+                "你是 Verilog / SystemVerilog / IEEE 语言标准参考文档问答助手。"
+                "知识库覆盖 IEEE 标准文档。"
                 "优先依据给定的检索上下文作答，不要把未检索到的内容说成文档明确规定。"
                 "如果证据不足，要明确说明。"
                 "默认用中文回答；若用户明确要求英文再切换。"
                 "引用页码时使用 [文档名 p.X] 形式，其中 X 来自 context JSON 里的 page 字段。"
-                "当问题属于语言语义时优先引用 IEEE；当问题属于 Xilinx/Vivado 综合行为、"
-                "属性、约束或工具策略时优先引用 Vivado。"
                 "回答要简洁，但要足够支撑 lint 诊断或规则判断。\n\n"
                 f"问题：\n{question}\n\n"
                 f"context JSON:\n{context_json}"
@@ -724,7 +721,7 @@ def build_hardware_reference_agentic_rag_tool(cfg: Any):
 
     @tool("query_reference_docs")
     async def query_reference_docs(question: str) -> str:
-        """Use the built-in hardware reference knowledge bases to answer Verilog/SystemVerilog semantics and Vivado synthesis questions with page citations."""
+        """Use the built-in hardware reference knowledge bases to answer Verilog/SystemVerilog semantics questions with page citations."""
 
         return await service.ask(question)
 

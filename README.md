@@ -22,7 +22,7 @@ unavailable or return graceful failure messages.
 - Uses LangGraph `StateGraph` for deterministic EDA preprocessing workflows.
 - Uses the lint tool to generate lint violation CSV reports.
 - Uses Yosys / OSS CAD Suite to generate AST, RTLIL, CFG, DDG, DFG, and netlist artifacts.
-- Uses Agentic RAG over hardware reference PDFs such as IEEE and Vivado documents.
+- Uses Agentic RAG over IEEE hardware reference PDFs.
 - Supports long-term memory, task planning, human-in-the-loop tool approval, and skill-based diagnosis workflows.
 
 ## Architecture
@@ -292,7 +292,7 @@ reports/_prepared/<session_id>/
 - Verilog source code
 - AST / CFG / DDG / DFG structure
 - self-built Verilog rule knowledge
-- IEEE / Vivado reference evidence when needed
+- IEEE reference evidence when needed
 
 6. The agent returns diagnosis, classification, evidence, and fix suggestions.
 

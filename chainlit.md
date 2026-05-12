@@ -27,7 +27,6 @@
 
 - 智能体会自动使用内置知识库对照分析。
 - 对涉及 Verilog / SystemVerilog 语言语义、`wire` / `reg`、连续赋值、过程块、阻塞/非阻塞赋值、`always_comb` / `always_ff` / `always_latch`、断言、接口或其他标准细节的问题，智能体会自动查询内置的 IEEE 标准 PDF 知识库，并给出页码依据。
-- 对涉及 Xilinx / Vivado 综合行为、属性、约束、综合策略或工具限制的问题，智能体会自动查询内置的 `vivado-synthesis.pdf` 参考文档，并给出页码依据。
 - 诊断文本内容为中文。
 - 默认输出为 JSON，不输出 Markdown 报告。
 - 默认结果目录是项目根目录下的 `reports`，在 Docker 客户包中会持久化到 `customer-data/reports`。

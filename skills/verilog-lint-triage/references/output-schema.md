@@ -70,7 +70,7 @@ Use this JSON structure for the final file.
   "standard_file_diagnosis": [
     {
       "file": "rtl/top.sv",
-      "summary_text": "基于适用的 IEEE 标准和/或 Vivado 综合文档对源码做独立诊断，识别出2条严重问题和1条提示项，其中同时包含 IEEE 与 Vivado 依据。",
+      "summary_text": "基于适用的 IEEE 标准对源码做独立诊断，识别出1条严重问题和1条提示项。",
       "findings": [
         {
           "id": "STD_001",
@@ -91,16 +91,6 @@ Use this JSON structure for the final file.
           "why": "源码当前使用传统 always 形式，虽然可以工作，但 always_comb 更能约束敏感列表完整性并明确组合逻辑意图。",
           "evidence": "always @(a or b) y = a & b & c;",
           "fix_hint": "将该组合过程块改写为 always_comb，并在修改后重新检查组合逻辑完整性。"
-        },
-        {
-          "id": "STD_003",
-          "code_line": 78,
-          "category": "严重",
-          "issue": "组合逻辑生成的 gated_clk 被当作时钟使用，不符合 Vivado 综合对时钟资源使用的建议。",
-          "standard_pages": "Vivado Synthesis Guide p.55",
-          "why": "在 FPGA 设计中，时钟应由专用全局时钟资源驱动。将 clk 与 en 的组合逻辑结果直接作为时钟，容易引入毛刺并带来时序收敛风险。",
-          "evidence": "assign gated_clk = clk & en;\\nalways @(posedge gated_clk) begin q <= d; end",
-          "fix_hint": "保持 clk 为全局时钟，将 en 改为寄存器使能条件，避免使用组合逻辑生成的 gated clock。"
         }
       ]
     }
@@ -153,13 +143,13 @@ Use this JSON structure for the final file.
   - `fix_hint`
 - `missed_defects[].id` should use a `MISSED_001`-style identifier.
 - `standard_file_diagnosis[].findings[].id` should use a `STD_001`-style identifier. Do not use an `I` prefix.
-- `standard_pages` stores page citations from the applicable built-in reference source. Keep the field name stable even when the citation comes from the Vivado synthesis document rather than IEEE.
-- For language-semantics findings, cite IEEE page numbers in `standard_pages`. For synthesis/tool-behavior findings, cite the built-in Vivado synthesis document page numbers. If both materially support the diagnosis, include both explicitly.
+- `standard_pages` stores page citations from the applicable built-in IEEE reference source.
+- For language-semantics findings, cite IEEE page numbers in `standard_pages`.
 - `category` in `standard_file_diagnosis[].findings` must be exactly one of:
   - `严重`
   - `一般`
   - `提示`
-- `standard_file_diagnosis` is code-only diagnosis. Do not use lint rows as evidence in that section. Use source code plus the applicable IEEE and/or Vivado built-in reference evidence only.
+- `standard_file_diagnosis` is code-only diagnosis. Do not use lint rows as evidence in that section. Use source code plus the applicable IEEE built-in reference evidence only.
 - The following text fields must be written in Chinese:
   - `summary.summary_text`
   - `lint_items[].issue`
@@ -181,5 +171,5 @@ Use this JSON structure for the final file.
 - Every real defect cites one or more knowledge-base rules where possible.
 - Missed defects are not duplicates of existing lint items.
 - Every source file has one `standard_file_diagnosis` entry.
-- Every standards/tool-reference diagnosis finding includes explicit page references to the supporting IEEE and/or Vivado source.
+- Every standards-based diagnosis finding includes explicit page references to the supporting IEEE source.
 - The file is valid JSON and not wrapped in Markdown.

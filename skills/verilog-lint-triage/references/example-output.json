@@ -87,7 +87,7 @@
   "standard_file_diagnosis": [
     {
       "file": "rtl/example.sv",
-      "summary_text": "基于适用的 IEEE 标准和/或 Vivado 综合文档对该文件做独立诊断，识别出2条严重问题和1条提示项，其中同时包含 IEEE 与 Vivado 依据。",
+      "summary_text": "基于适用的 IEEE 标准对该文件做独立诊断，识别出1条严重问题和1条提示项。",
       "findings": [
         {
           "id": "STD_001",
@@ -108,16 +108,6 @@
           "why": "源码当前使用传统 always 形式，虽然可以工作，但 always_comb 更能约束敏感列表完整性并明确组合逻辑意图。",
           "evidence": "always @(a or b) y = a & b & c;",
           "fix_hint": "将该组合过程块改写为 always_comb，并在修改后重新检查组合逻辑完整性。"
-        },
-        {
-          "id": "STD_003",
-          "code_line": 48,
-          "category": "严重",
-          "issue": "组合逻辑生成的 gated_clk 被当作时钟使用，不符合 Vivado 综合对时钟资源使用的建议。",
-          "standard_pages": "Vivado Synthesis Guide p.55",
-          "why": "在 FPGA 设计中，时钟应由专用全局时钟资源驱动。将 clk 与 en 的组合逻辑结果直接作为时钟，容易引入毛刺并带来时序收敛风险。",
-          "evidence": "assign gated_clk = clk & en;\\nalways @(posedge gated_clk) begin q <= d; end",
-          "fix_hint": "保持 clk 为全局时钟，将 en 改为寄存器使能条件，避免使用组合逻辑生成的 gated clock。"
         }
       ]
     }

@@ -1,11 +1,11 @@
 ---
 name: verilog-lint-triage
-description: Use this skill when the user provides Verilog/SystemVerilog source files and a lint report, and wants the lint rows first pre-grouped by same source line and same violation description, then triaged into severe defect, general defect, or false positive, plus missed-defect discovery mapped to rules in the built-in custom knowledge base under skills/verilog-lint-triage/references, while batching IEEE standard lookups by semantic topic instead of per lint row and using the built-in Vivado synthesis document when the issue depends on synthesis behavior or tool guidance, plus a separate standards-based code-only diagnosis section grounded in IEEE and/or Vivado built-in references, with the final result written to a timestamped JSON file.
+description: Use this skill when the user provides Verilog/SystemVerilog source files and a lint report, and wants the lint rows first pre-grouped by same source line and same violation description, then triaged into severe defect, general defect, or false positive, plus missed-defect discovery mapped to rules in the built-in custom knowledge base under skills/verilog-lint-triage/references, while batching IEEE standard lookups by semantic topic instead of per lint row, plus a separate standards-based code-only diagnosis section grounded in IEEE built-in references, with the final result written to a timestamped JSON file.
 license: MIT
 compatibility: Assumes the agent shell runs with the lint_agent project root as its working directory and can access the input HDL files, the lint report, and the self-built knowledge base directory at skills/verilog-lint-triage/references.
 metadata:
   author: zk
-  version: "1.3"
+  version: "1.4"
 ---
 
 # Verilog Lint Triage
@@ -16,7 +16,7 @@ metadata:
 - The user wants you to decide whether each lint finding is a real defect or a false positive.
 - The user wants missed defects added, and each real defect mapped to one or more rules in the self-built knowledge base.
 - The user wants a machine-readable JSON result file, not only prose.
-- The user also wants a standards/tool-reference diagnosis section that is based on the source code itself rather than the lint report.
+- The user also wants a standards-based diagnosis section that is based on the source code itself rather than the lint report.
 
 ## Required Inputs
 
@@ -31,9 +31,9 @@ metadata:
 
 - Read the self-built knowledge base file in `skills/verilog-lint-triage/references/` before making any defect judgment.
 - Read the knowledge base as `utf-8-sig`. The file currently starts with a BOM.
-- Before calling `query_reference_docs`, first group candidate IEEE-dependent or Vivado-dependent questions by semantic topic. Typical IEEE topics include blocking vs nonblocking assignment semantics, combinational process completeness and `always_comb`, event control and sensitivity semantics, net/variable declaration rules, typing rules, reset semantics, interface/modport rules, and assertion semantics. Typical Vivado topics include synthesis inference behavior, `RAM_STYLE`, `FSM_ENCODING`, resource mapping, attributes, constraints interactions, and tool-specific coding guidance.
+- Before calling `query_reference_docs`, first group candidate IEEE-dependent questions by semantic topic. Typical IEEE topics include blocking vs nonblocking assignment semantics, combinational process completeness and `always_comb`, event control and sensitivity semantics, net/variable declaration rules, typing rules, reset semantics, interface/modport rules, and assertion semantics.
 - Do not call `query_reference_docs` once per lint row. Prefer a small number of topic-level queries that can support multiple lint findings at once.
-- Only call `query_reference_docs` for issues that truly depend on Verilog or SystemVerilog language semantics, scheduling rules, procedural block behavior, `wire` / `reg` / variable rules, assignment semantics, typing rules, assertion semantics, interface/modport rules, Vivado synthesis behavior, synthesis attributes, constraints-sensitive inference, or another point that should be checked against the built-in IEEE standard or Vivado synthesis document.
+- Only call `query_reference_docs` for issues that truly depend on Verilog or SystemVerilog language semantics, scheduling rules, procedural block behavior, `wire` / `reg` / variable rules, assignment semantics, typing rules, assertion semantics, interface/modport rules, or another point that should be checked against the built-in IEEE standard.
 - Identify the lint report format first. It may be CSV, TSV, plain text, or a tool-specific table dump.
 - Preserve the original report lines. In merged `lint_items`, record their physical 1-based line numbers in `report_line_numbers`.
 - Skip blank lines and obvious header rows. If they matter, mention the handling briefly in `summary.summary_text`.
@@ -48,7 +48,7 @@ metadata:
 - If the report points to a wrong file or wrong line, still keep the original lint line in the grouped result and explain the mismatch.
 - Map each grouped issue to the most relevant rule or rules from the self-built knowledge base.
 - For ambiguous findings, or any finding tied to IEEE language behavior, legacy Verilog semantics, or SystemVerilog semantics, reuse the batched topic-level `query_reference_docs` results before finalizing the judgment and fold the returned page citations into `why` when they materially support the diagnosis.
-- For findings tied to Vivado synthesis behavior, synthesis attributes, resource inference, or other tool-specific implementation behavior, reuse the batched topic-level `query_reference_docs` results from the built-in Vivado synthesis document before finalizing the judgment and fold the returned page citations into `why` when they materially support the diagnosis.
+- Do not call `query_reference_docs` for vendor-specific synthesis attributes, resource inference, constraints, or implementation behavior unless the judgment also depends on IEEE language semantics.
 - A single IEEE query result may support multiple `lint_items` and missed defects if they share the same semantic topic. Reuse citations instead of re-querying.
 - Assign exactly one category:
   - `严重`: Clear real defect with likely functional risk, synthesis/simulation mismatch, timing/data-loss risk, latch risk, CDC/reset/FSM failure risk, or another materially dangerous hardware bug.
@@ -65,21 +65,21 @@ metadata:
 
 - After processing the lint lines, review the relevant HDL code for clearly evidenced defects that the report missed.
 - Only add a missed defect if you can point to concrete code and at least one supporting rule from the knowledge base.
-- If the missed defect hinges on Verilog or SystemVerilog standard semantics, first try to reuse an existing topic-level IEEE query result. If it hinges on Vivado synthesis behavior or tool-specific inference behavior, first try to reuse an existing Vivado-oriented query result. Only issue a new `query_reference_docs` call when the missed defect introduces a new semantic or synthesis topic that has not been covered yet.
+- If the missed defect hinges on Verilog or SystemVerilog standard semantics, first try to reuse an existing topic-level IEEE query result. Only issue a new `query_reference_docs` call when the missed defect introduces a new semantic topic that has not been covered yet.
 - Missed defects may only use `严重` or `一般`. Do not create missed-defect entries tagged `误报`.
 
 ### 4. Add a standards-based code-only diagnosis
 
 - After `missed_defects`, add a new top-level section named `standard_file_diagnosis`.
-- This section is independent from the lint report. For this section, inspect each source file directly and use the source code plus the applicable built-in reference evidence. IEEE language-standard evidence and the built-in Vivado synthesis document are peer sources here. Do not rely on lint rows when deciding whether to add a diagnosis finding.
+- This section is independent from the lint report. For this section, inspect each source file directly and use the source code plus the applicable built-in IEEE reference evidence. Do not rely on lint rows when deciding whether to add a diagnosis finding.
 - Create one entry per source file listed in `summary.source_files`, even if a file ends up with zero findings.
-- For each source file, organize diagnoses by semantic topic or synthesis/tool topic and reuse prior topic-level query results whenever possible. Only issue new `query_reference_docs` calls for topics not yet covered in this run.
-- Use IEEE when the judgment depends on Verilog/SystemVerilog language semantics. Use the built-in Vivado synthesis document when the judgment depends on synthesis behavior, inference rules, attributes, or other tool-specific implementation behavior. Do not force either source onto a topic that belongs to the other.
-- Do not query IEEE or Vivado for naming, style, lint-tool policy, general CDC methodology, general constraint methodology, DO-254 process, or other topics outside the scope of those built-in references unless the judgment truly depends on language semantics or Vivado synthesis behavior.
+- For each source file, organize diagnoses by semantic topic and reuse prior topic-level query results whenever possible. Only issue new `query_reference_docs` calls for topics not yet covered in this run.
+- Use IEEE when the judgment depends on Verilog/SystemVerilog language semantics.
+- Do not query IEEE for naming, style, lint-tool policy, general CDC methodology, general constraint methodology, DO-254 process, or other topics outside the scope of the built-in reference unless the judgment truly depends on language semantics.
 - Record only findings that are supported by concrete code evidence and citations from the applicable built-in reference source.
-- When a finding is IEEE-based, present it as an IEEE-supported diagnosis. When a finding is Vivado-based, present it as a Vivado-supported diagnosis. If both are materially needed, cite both explicitly without treating one as subordinate to the other.
+- When a finding is IEEE-based, present it as an IEEE-supported diagnosis.
 - In `standard_file_diagnosis[].findings`, use `category` values `严重`, `一般`, or `提示`.
-- If a file has no independent standards/tool-reference diagnosis findings, keep `findings` as an empty array and explain that in `summary_text`.
+- If a file has no independent standards-based diagnosis findings, keep `findings` as an empty array and explain that in `summary_text`.
 
 ### 5. Write the final JSON file
 
@@ -141,13 +141,13 @@ python skills/verilog-lint-triage/scripts/validate_triage_json.py <json_path>
 - `summary.knowledge_base` should use a user-facing label such as `自建知识库`, not a filesystem path.
 - `summary.output_path` should point to `reports/verilog_lint_triage_result_<YYYYMMDD_HHMMSS>.json` unless the user explicitly provided another output location.
 - Each real defect must reference the violated knowledge-base rule IDs and descriptions.
-- When `query_reference_docs` returns useful evidence, mention the IEEE standard and/or Vivado synthesis document page numbers directly in `why`, `why_missed_by_lint`, or `standard_pages`, according to the source actually used.
-- Prefer a small number of topic-level IEEE and Vivado queries for a typical small triage run. Exceed that only when the code genuinely spans multiple unrelated semantic or synthesis/tool topics.
+- When `query_reference_docs` returns useful evidence, mention the IEEE standard page numbers directly in `why`, `why_missed_by_lint`, or `standard_pages`, according to the source actually used.
+- Prefer a small number of topic-level IEEE queries for a typical small triage run. Exceed that only when the code genuinely spans multiple unrelated semantic topics.
 - If multiple knowledge-base rules apply, include all strong matches and order the most direct rule first.
 - If the lint tool rule name is missing, preserve the raw report text and explain how you inferred the relevant knowledge-base rule.
 - Each `standard_file_diagnosis` entry must contain `file`, `summary_text`, and `findings`.
 - Each `standard_file_diagnosis[].findings[]` item must contain `id`, `code_line`, `category`, `issue`, `standard_pages`, `why`, `evidence`, and `fix_hint`.
-- `standard_file_diagnosis` is code-only diagnosis: do not cite lint rows or use the lint report as evidence in that section. Use source code plus the applicable IEEE and/or Vivado built-in reference evidence only.
+- `standard_file_diagnosis` is code-only diagnosis: do not cite lint rows or use the lint report as evidence in that section. Use source code plus the applicable IEEE built-in reference evidence only.
 
 ## Guardrails
 
@@ -161,7 +161,7 @@ python skills/verilog-lint-triage/scripts/validate_triage_json.py <json_path>
 ## Example Requests
 
 - "Analyze `rtl/top.sv` and `reports/alint.csv`, decide which lint findings are real defects, find missed defects, and write the JSON result."
-- "Read my uploaded Verilog/SystemVerilog files plus the lint report, use the self-built knowledge base, generate a triage JSON with `严重` / `一般` / `误报`, and then append a standards-based code-only diagnosis section for each source file using IEEE and/or Vivado built-in references as appropriate."
+- "Read my uploaded Verilog/SystemVerilog files plus the lint report, use the self-built knowledge base, generate a triage JSON with `严重` / `一般` / `误报`, and then append a standards-based code-only diagnosis section for each source file using IEEE built-in references as appropriate."
 
 ## Example Output
 
