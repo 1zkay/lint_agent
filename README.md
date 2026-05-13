@@ -120,7 +120,7 @@ includes UI-related dependencies.
 
 Prebuilt customer Docker images are available from Baidu Netdisk:
 
-[Download from Baidu Netdisk](https://pan.baidu.com/s/1ZmkFPn5icKgY3T5h6hXFaA?pwd=mfa8)
+[Download from Baidu Netdisk](https://pan.baidu.com/s/11hjFyiszVw77wKCz5GpYtw?pwd=e6qf)
 
 These images can run the packaged Chainlit agent without requiring local Python
 dependency installation. The lint tool and Yosys are still optional from the perspective
