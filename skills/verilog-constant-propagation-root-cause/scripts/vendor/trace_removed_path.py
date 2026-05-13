@@ -139,6 +139,19 @@ class RemovedItem:
 
 
 @dataclass
+class ConstantizedSignalItem:
+    kind: str
+    path: str
+    parent_path: str
+    signal: str
+    signal_kind: str
+    before_driver: str = ""
+    raw_folded_value: str = ""
+    after_value: str = ""
+    affected_signals: List[AffectedSignal] = field(default_factory=list)
+
+
+@dataclass
 class SourcePrimitiveCell:
     module_name: str
     instance_name: str
@@ -961,6 +974,70 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
         walk(root_context)
         return root_context, contexts_preorder, self._context_map(contexts_preorder)
 
+    @staticmethod
+    def _rtlil_constant_token_bits(token: str) -> Optional[str]:
+        token = token.strip()
+        if token in {"0", "1"}:
+            return token
+        match = re.fullmatch(r"(\d+)'([01xz]+)", token)
+        if not match:
+            return None
+        return match.group(2)
+
+    def _rtlil_constant_value_from_tokens(self, tokens: List[str]) -> Optional[str]:
+        if not tokens:
+            return None
+
+        bit_chunks: List[str] = []
+        for token in tokens:
+            bits = self._rtlil_constant_token_bits(token)
+            if bits is None:
+                return None
+            bit_chunks.append(bits)
+
+        bit_string = "".join(bit_chunks)
+        if not bit_string or any(bit not in {"0", "1"} for bit in bit_string):
+            return None
+        return f"{len(bit_string)}'b{bit_string}"
+
+    def _rtlil_direct_driver_tokens(
+        self, module_info: RtlilModuleInfo, local_name: str
+    ) -> Optional[List[str]]:
+        for lhs_tokens, rhs_tokens in module_info.connects:
+            if lhs_tokens == [local_name]:
+                return list(rhs_tokens)
+        return None
+
+    def _rtlil_direct_driver(
+        self, module_info: RtlilModuleInfo, local_name: str
+    ) -> Optional[str]:
+        tokens = self._rtlil_direct_driver_tokens(module_info, local_name)
+        if tokens is None:
+            return None
+        return " ".join(tokens)
+
+    def _rtlil_direct_constant(
+        self, module_info: RtlilModuleInfo, local_name: str
+    ) -> Optional[str]:
+        tokens = self._rtlil_direct_driver_tokens(module_info, local_name)
+        if tokens is None:
+            return None
+        return self._rtlil_constant_value_from_tokens(tokens)
+
+    def _rtlil_constant_through_driver(
+        self, module_info: RtlilModuleInfo, local_name: str
+    ) -> Tuple[str, str]:
+        driver_tokens = self._rtlil_direct_driver_tokens(module_info, local_name)
+        if not driver_tokens or len(driver_tokens) != 1:
+            return "", ""
+
+        driver = driver_tokens[0]
+        if driver in module_info.inputs or driver in module_info.outputs:
+            return driver, ""
+
+        folded_value = self._rtlil_direct_constant(module_info, driver) or ""
+        return driver, folded_value
+
     def _rtlil_alias_graph(self, module_info: RtlilModuleInfo) -> Dict[str, Set[str]]:
         graph: Dict[str, Set[str]] = defaultdict(set)
         for lhs_tokens, rhs_tokens in module_info.connects:
@@ -1695,6 +1772,58 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             return [target_signal]
         return [root.hierarchical_signal, target_signal]
 
+    def _collect_constantized_signals(self) -> List[ConstantizedSignalItem]:
+        """Find named outputs that optimization rewired directly to constants."""
+        constantized: List[ConstantizedSignalItem] = []
+        seen: Set[str] = set()
+
+        for record in self.raw_signal_records:
+            if record.signal_kind not in {"output", "inout"}:
+                continue
+
+            if record.hierarchical_signal in seen:
+                continue
+            ctx = self.raw_context_map.get(record.module)
+            if ctx is None:
+                continue
+
+            local_name = record.hierarchical_signal.split(".")[-1]
+            before_module_info = self.before_rtlil_modules.get(ctx.module_name)
+            opt_module_info = self.opt_rtlil_modules.get(ctx.module_name)
+            if before_module_info is None or opt_module_info is None:
+                continue
+
+            after_value = self._rtlil_direct_constant(opt_module_info, local_name)
+            if after_value is None:
+                continue
+            before_value = self._rtlil_direct_constant(before_module_info, local_name)
+            if before_value == after_value:
+                continue
+
+            before_driver, raw_folded_value = self._rtlil_constant_through_driver(
+                before_module_info,
+                local_name,
+            )
+            if not before_driver:
+                before_driver = self._rtlil_direct_driver(before_module_info, local_name) or ""
+
+            constantized.append(
+                ConstantizedSignalItem(
+                    kind="constantized_signal",
+                    path=record.hierarchical_signal,
+                    parent_path=ctx.path_str,
+                    signal=record.hierarchical_signal,
+                    signal_kind=record.signal_kind,
+                    before_driver=before_driver,
+                    raw_folded_value=raw_folded_value,
+                    after_value=after_value,
+                    affected_signals=[self._record_to_affected(record)],
+                )
+            )
+            seen.add(record.hierarchical_signal)
+
+        return constantized
+
     def _collect_removed_items(self) -> Dict[str, List[RemovedItem]]:
         removed_instances: List[RemovedItem] = []
         removed_cells: List[RemovedItem] = []
@@ -1857,11 +1986,13 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
 
         removed_instances = diff_findings["removed_instances"]
         removed_cells = diff_findings["removed_cells"]
-        total_affected_signals = sum(len(item.affected_signals) for item in removed_instances + removed_cells)
+        constantized_signals = self._collect_constantized_signals()
+        structural_items = removed_instances + removed_cells + constantized_signals
+        total_affected_signals = sum(len(item.affected_signals) for item in structural_items)
         referenced_roots = sorted(
             {
                 root_id
-                for item in removed_instances + removed_cells
+                for item in structural_items
                 for affected in item.affected_signals
                 for root_id in affected.roots
             }
@@ -1870,6 +2001,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
         summary = {
             "removed_instance_count": len(removed_instances),
             "removed_cell_count": len(removed_cells),
+            "constantized_signal_count": len(constantized_signals),
             "affected_signal_count": total_affected_signals,
             "referenced_root_count": len(referenced_roots),
             "conflict_count": len(self.conflicts),
@@ -1883,13 +2015,17 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             summary["potential_issues"].append(
                 f"发现 {summary['removed_cell_count']} 个被删除的局部组合单元，其输出受常量传播影响。"
             )
+        if summary["constantized_signal_count"] > 0:
+            summary["potential_issues"].append(
+                f"发现 {summary['constantized_signal_count']} 个优化后被直接常量化的输出信号。"
+            )
         if summary["affected_signal_count"] > 0:
             summary["potential_issues"].append(
-                f"发现 {summary['affected_signal_count']} 个受被删除项影响的常量信号。"
+                f"发现 {summary['affected_signal_count']} 个受结构优化影响的常量信号。"
             )
         if summary["referenced_root_count"] > 0:
             summary["potential_issues"].append(
-                f"已将被删除项关联到 {summary['referenced_root_count']} 个显式常量根源。"
+                f"已将结构优化项关联到 {summary['referenced_root_count']} 个显式常量根源。"
             )
         if summary["conflict_count"] > 0:
             summary["potential_issues"].append(
@@ -1906,6 +2042,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             "summary": summary,
             "removed_instances": [asdict(item) for item in removed_instances],
             "removed_cells": [asdict(item) for item in removed_cells],
+            "constantized_signals": [asdict(item) for item in constantized_signals],
             "referenced_roots": referenced_root_records,
             "raw_constant_signal_count": len(self.raw_signal_records),
             "raw_conflicts": list(self.conflicts),
@@ -1948,6 +2085,19 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 "受影响信号": [convert_affected(sig) for sig in item.get("affected_signals", [])],
             }
 
+        def convert_constantized_item(item: Dict) -> Dict:
+            return {
+                "类型": item["kind"],
+                "路径": item["path"],
+                "父路径": item["parent_path"],
+                "信号": item["signal"],
+                "信号类别": item["signal_kind"],
+                "raw驱动": item.get("before_driver", ""),
+                "raw已折叠值": item.get("raw_folded_value", ""),
+                "优化后常量值": item.get("after_value", ""),
+                "受影响信号": [convert_affected(sig) for sig in item.get("affected_signals", [])],
+            }
+
         def convert_root(root: Dict) -> Dict:
             return {
                 "层次化信号": root["hierarchical_signal"],
@@ -1960,7 +2110,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             }
 
         return {
-            "报告类型": "常量传播删除项分析",
+            "报告类型": "常量传播结构优化分析",
             "报告格式": "json",
             "生成时间": datetime.now().isoformat(timespec="seconds"),
             "设计输入": list(self.design_inputs),
@@ -1971,6 +2121,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 "摘要": {
                     "被删除的模块实例数量": summary["removed_instance_count"],
                     "被删除的局部组合单元数量": summary["removed_cell_count"],
+                    "优化后被直接常量化的信号数量": summary["constantized_signal_count"],
                     "受影响信号数量": summary["affected_signal_count"],
                     "关联到的显式根源数量": summary["referenced_root_count"],
                     "raw传播冲突数量": summary["conflict_count"],
@@ -1978,6 +2129,10 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 },
                 "被删除的模块实例": [convert_removed_item(item) for item in analysis_results["removed_instances"]],
                 "被删除的局部组合单元": [convert_removed_item(item) for item in analysis_results["removed_cells"]],
+                "优化后被直接常量化的信号": [
+                    convert_constantized_item(item)
+                    for item in analysis_results["constantized_signals"]
+                ],
                 "关联到的显式常量根源": [convert_root(root) for root in analysis_results["referenced_roots"]],
                 "raw常量信号数量": analysis_results["raw_constant_signal_count"],
                 "raw传播冲突": analysis_results["raw_conflicts"],
@@ -2007,7 +2162,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(
         description=(
-            "对比 raw_proc/opt_proc 层次网表，定位被删除的实例或组合单元，"
+            "对比 raw_proc/opt_proc 层次网表，定位被删除的实例、组合单元或被直接常量化的输出信号，"
             "并将其受影响的常量信号回溯到显式根源。"
         )
     )
@@ -2064,6 +2219,7 @@ def main() -> int:
             "\n摘要: "
             f"被删除模块实例={summary['removed_instance_count']}，"
             f"被删除局部组合单元={summary['removed_cell_count']}，"
+            f"直接常量化信号={summary['constantized_signal_count']}，"
             f"受影响信号={summary['affected_signal_count']}，"
             f"关联根源={summary['referenced_root_count']}，"
             f"冲突={summary['conflict_count']}"
@@ -2074,12 +2230,16 @@ def main() -> int:
         print(f"附加导出文件: {raw_proc_path}")
         print(f"附加导出文件: {opt_proc_path}")
 
-        has_issue = bool(results["removed_instances"] or results["removed_cells"])
+        has_issue = bool(
+            results["removed_instances"]
+            or results["removed_cells"]
+            or results["constantized_signals"]
+        )
         if has_issue:
-            print("\n检测到与被删除项相关的常量传播问题。")
+            print("\n检测到与结构优化相关的常量传播问题。")
             return 1
 
-        print("\n未检测到与被删除项相关的常量传播问题。")
+        print("\n未检测到与结构优化相关的常量传播问题。")
         return 0
 
     except FileNotFoundError as exc:

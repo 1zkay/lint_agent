@@ -75,8 +75,8 @@ def build_diagnosis_bundle(
             "source_code",
         ],
         "final_diagnosis_workflow": [
-            "先读取 JSON 报告，确定显式根源、被删除项和代表性受影响信号。",
-            "再对照 raw_proc.il 和 opt_proc.il，确认优化前后哪些局部单元或实例被删除。",
+            "先读取 JSON 报告，确定显式根源、被删除项、被直接常量化的信号和代表性受影响信号。",
+            "再对照 raw_proc.il 和 opt_proc.il，确认优化前后哪些局部单元或实例被删除，或哪些输出被改接为常量。",
             "最后回到源代码，阅读根源模块和被污染子模块附近的源码，判断这是设计预期常量还是疑似真实缺陷。",
         ],
     }

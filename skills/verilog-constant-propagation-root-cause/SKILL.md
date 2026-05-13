@@ -4,7 +4,7 @@ description: Use this skill when the user provides Verilog/SystemVerilog source 
 license: MIT
 metadata:
   author: zk
-  version: "1.3"
+  version: "1.4"
 ---
 
 # Verilog Constant Propagation Root Cause
@@ -50,6 +50,7 @@ python skills/verilog-constant-propagation-root-cause/scripts/run_constant_trace
 - Focus on:
   - Summary counts
   - Removed local cells and removed instances
+  - Signals that become direct constants after optimization
   - Associated explicit roots
 - Treat `raw_proc.il`, `opt_proc.il`, and source code as required evidence for the final diagnosis, not optional extras.
 - Only open `raw_design.json` when the report is not enough to explain a root or a removed item.
@@ -72,8 +73,9 @@ python skills/verilog-constant-propagation-root-cause/scripts/run_constant_trace
 - Use them to confirm:
   - which local cells existed before optimization,
   - which ones disappeared after optimization,
-  - and whether the removed logic matches the claimed root and polluted path.
-- Do not manually diff the whole files line-by-line unless necessary. Start from the removed item path or the relevant source location from the report.
+  - which output signals are rewired to direct constants after optimization,
+  - and whether the removed or constantized logic matches the claimed root and polluted path.
+- Do not manually diff the whole files line-by-line unless necessary. Start from the removed item path, constantized signal path, or the relevant source location from the report.
 
 ### 5. Final diagnosis is mandatory
 
@@ -84,6 +86,7 @@ python skills/verilog-constant-propagation-root-cause/scripts/run_constant_trace
   - `opt_proc.il`
   - source files around the root and the polluted modules
 - A result is not complete until the agent checks whether the removed logic seen in RTLIL matches the root and the source-level intent.
+- If the report contains no removed cells but does contain constantized signals, treat those signal entries as the structural optimization evidence.
 
 ### 6. Write the final Chinese JSON diagnosis
 
@@ -116,8 +119,8 @@ python skills/verilog-constant-propagation-root-cause/scripts/run_constant_trace
       "polluted_signals": ["valid_i", "enable_i"],
       "removed_logic": ["u_child.$procmux$12"],
       "evidence": {
-        "report_item": "trace_removed_path_report.json 中对应根源和删除项",
-        "rtlil_evidence": "raw_proc.il 中存在相关逻辑，opt_proc.il 中被删除",
+        "report_item": "trace_removed_path_report.json 中对应根源和删除项/常量化信号",
+        "rtlil_evidence": "raw_proc.il 中存在相关逻辑，opt_proc.il 中被删除或输出被改接为常量",
         "source_evidence": "源码中该控制信号被上层常量连接，未看到明确配置意图"
       },
       "diagnosis": "上层常量连接污染子模块控制路径，导致下游逻辑被优化删除，疑似非预期常量传播。",
@@ -145,7 +148,7 @@ Field rules:
 - Do not treat every constant root as a defect.
 - Do not rely only on signal names. Read the source around the root and the polluted modules.
 - Do not claim a parent-module named root unless the detector already promoted it or the source clearly proves it.
-- Do not ignore removed-item evidence; the detector is intentionally filtered to constants that already caused structural optimization.
+- Do not ignore removed-item or constantized-signal evidence; the detector is intentionally filtered to constants that already caused structural optimization.
 - Do not spend time manually reading the full `raw_design.json` unless the report and source are insufficient.
 
 ## References
