@@ -116,7 +116,7 @@ def main() -> int:
     env["PYTHONUTF8"] = "1"
     result = subprocess.run(
         cmd,
-        cwd=str(skill_dir),
+        cwd=str(project_root),
         capture_output=True,
         text=True,
         encoding="utf-8",
