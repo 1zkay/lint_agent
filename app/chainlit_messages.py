@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,37 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from workspace.path_resolver import to_project_relative_path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+NAMED_UPLOADS_DIRNAME = "_uploaded_files"
+
+
+def _safe_uploaded_filename(name: str, fallback: str) -> str:
+    """Return a local filename derived from the browser-provided upload name."""
+    cleaned = str(name or "").replace("\x00", "").replace("\\", "/").strip()
+    filename = Path(cleaned).name
+    if filename in {"", ".", ".."}:
+        return fallback
+    return filename
+
+
+def _named_upload_copy_path(source_path: Path, original_name: str) -> Path:
+    file_id = source_path.stem or source_path.name
+    filename = _safe_uploaded_filename(original_name, fallback=source_path.name)
+    return source_path.parent / NAMED_UPLOADS_DIRNAME / file_id / filename
+
+
+def _ensure_named_upload_copy(source_path: Path, original_name: str) -> Path:
+    """Copy a Chainlit cached upload to a path whose filename is the upload name."""
+    named_path = _named_upload_copy_path(source_path, original_name)
+    if source_path.resolve() == named_path.resolve():
+        return source_path
+
+    named_path.parent.mkdir(parents=True, exist_ok=True)
+    if (
+        not named_path.exists()
+        or named_path.stat().st_size != source_path.stat().st_size
+    ):
+        shutil.copy2(source_path, named_path)
+    return named_path
 
 
 def build_human_message_from_chainlit_message(message: cl.Message) -> HumanMessage:
@@ -40,8 +72,13 @@ def build_human_message_from_chainlit_message(message: cl.Message) -> HumanMessa
             attachment_notes.append(f"- `{name}`: file not found (path={path_str})")
             continue
 
-        abs_path = str(p.resolve())
-        tool_path = to_project_relative_path(p, PROJECT_ROOT)
+        try:
+            readable_path = _ensure_named_upload_copy(p, name)
+        except Exception:
+            readable_path = p
+
+        abs_path = str(readable_path.resolve())
+        tool_path = to_project_relative_path(readable_path, PROJECT_ROOT)
         if tool_path:
             attachment_notes.append(f"- `{name}`: use project-relative path `{tool_path}` (mime={mime})")
         else:
