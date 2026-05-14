@@ -94,6 +94,11 @@ def main() -> int:
     )
     parser.add_argument("inputs", nargs="+", help="source files or source directories")
     parser.add_argument("--top", required=True, help="top module name")
+    parser.add_argument(
+        "--yosys",
+        default=None,
+        help="optional Yosys executable path forwarded to the detector",
+    )
     args = parser.parse_args()
 
     skill_dir, project_root, tool = resolve_paths()
@@ -111,6 +116,8 @@ def main() -> int:
         "--output",
         str(output_path),
     ]
+    if args.yosys:
+        cmd.extend(["--yosys", args.yosys])
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"

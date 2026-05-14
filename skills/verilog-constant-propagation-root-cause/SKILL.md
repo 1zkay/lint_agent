@@ -52,6 +52,7 @@ python skills/verilog-constant-propagation-root-cause/scripts/run_constant_trace
   - Removed local cells and removed instances
   - Signals that become direct constants after optimization
   - Associated explicit roots
+  - Source-level direct constant roots (`源码直接常量根源`) on each removed/constantized item
 - Treat `raw_proc.il`, `opt_proc.il`, and source code as required evidence for the final diagnosis, not optional extras.
 - Only open `raw_design.json` when the report is not enough to explain a root or a removed item.
 
@@ -74,14 +75,14 @@ python skills/verilog-constant-propagation-root-cause/scripts/run_constant_trace
   - which local cells existed before optimization,
   - which ones disappeared after optimization,
   - which output signals are rewired to direct constants after optimization,
-  - and whether the removed or constantized logic matches the claimed root and polluted path.
+  - and whether the removed or constantized logic matches the claimed source-level direct constant roots and polluted path.
 - Do not manually diff the whole files line-by-line unless necessary. Start from the removed item path, constantized signal path, or the relevant source location from the report.
 
 ### 5. Final diagnosis is mandatory
 
 - Do not stop after reading the JSON report.
 - The final diagnosis must combine:
-  - `trace_removed_path_report.json`
+  - `trace_removed_path_report.json`, especially each item's `源码直接常量根源` field when present
   - `raw_proc.il`
   - `opt_proc.il`
   - source files around the root and the polluted modules

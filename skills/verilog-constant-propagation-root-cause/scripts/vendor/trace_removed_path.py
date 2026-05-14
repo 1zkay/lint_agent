@@ -107,6 +107,38 @@ BINARY_EXPR_OPERATORS = (
     "%",
 )
 
+SOURCE_ASSIGN_RE = re.compile(r"\bassign\s+(?P<lhs>.*?)\s*=\s*(?P<rhs>.*?);", re.DOTALL)
+VERILOG_ESCAPED_ID_RE = re.compile(r"\\\S+")
+VERILOG_SIZED_CONST_RE = re.compile(
+    r"\b\d+\s*'\s*[bBdDhHoO]\s*[0-9a-fA-F_xXzZ_]+\b"
+)
+VERILOG_SIMPLE_REF_RE = re.compile(
+    r"\b[A-Za-z_][A-Za-z0-9_$]*(?:\s*\[\s*\d+\s*(?::\s*\d+\s*)?\])?"
+)
+SOURCE_EXPR_KEYWORDS = {
+    "assign",
+    "case",
+    "casex",
+    "casez",
+    "default",
+    "else",
+    "end",
+    "endcase",
+    "endfunction",
+    "endmodule",
+    "function",
+    "if",
+    "input",
+    "inout",
+    "localparam",
+    "logic",
+    "module",
+    "output",
+    "parameter",
+    "reg",
+    "wire",
+}
+
 
 @dataclass
 class PropagationPath:
@@ -125,6 +157,7 @@ class AffectedSignal:
     roots: List[str] = field(default_factory=list)
     reason: str = ""
     propagation_paths: List[PropagationPath] = field(default_factory=list)
+    source_direct_roots: List["SourceDirectRoot"] = field(default_factory=list)
 
 
 @dataclass
@@ -149,6 +182,24 @@ class ConstantizedSignalItem:
     raw_folded_value: str = ""
     after_value: str = ""
     affected_signals: List[AffectedSignal] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SourceDirectRoot:
+    signal: str
+    value: str
+    location: str = ""
+    expression: str = ""
+
+
+@dataclass
+class SourceAssignInfo:
+    module_name: str
+    lhs: str
+    rhs: str
+    deps: List[str] = field(default_factory=list)
+    const_value: str = ""
+    location: str = ""
 
 
 @dataclass
@@ -204,6 +255,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
         self.source_instance_connections: Dict[str, Dict[str, Dict[str, str]]] = (
             self._build_source_instance_connections()
         )
+        self.source_assigns: Dict[str, Dict[str, SourceAssignInfo]] = self._build_source_assigns()
         self.literal_root_promotion_cache: Dict[str, str] = {}
         self.promoted_root_origins: Dict[str, Set[str]] = defaultdict(set)
 
@@ -298,6 +350,92 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
         if token:
             args.append(token)
         return args
+
+    @staticmethod
+    def _normalize_source_signal_token(token: str) -> str:
+        token = token.strip()
+        if token.startswith("\\"):
+            token = token[1:]
+        return re.sub(r"\s+", "", token.strip())
+
+    @staticmethod
+    def _source_lhs_name(expr: str) -> Optional[str]:
+        token = expr.strip()
+        if not token or any(ch in token for ch in "{},()"):
+            return None
+        if token.startswith("\\"):
+            return OptimizationDiffRemovedTracer._normalize_source_signal_token(token)
+        if VERILOG_SIMPLE_REF_RE.fullmatch(token):
+            return OptimizationDiffRemovedTracer._normalize_source_signal_token(token)
+        return None
+
+    @staticmethod
+    def _parse_source_constant(expr: str) -> str:
+        token = expr.strip()
+        match = re.fullmatch(
+            r"(\d+)\s*'\s*([bBdDhHoO])\s*([0-9a-fA-F_xXzZ_]+)",
+            token,
+        )
+        if not match:
+            return ""
+        width, base, digits = match.groups()
+        return f"{width}'{base.lower()}{digits.replace('_', '').lower()}"
+
+    @staticmethod
+    def _source_expr_refs(expr: str) -> List[str]:
+        refs: List[str] = []
+
+        def add_ref(raw: str) -> None:
+            name = OptimizationDiffRemovedTracer._normalize_source_signal_token(raw)
+            if not name:
+                return
+            base = name.split("[", 1)[0]
+            if base in SOURCE_EXPR_KEYWORDS:
+                return
+            if base[0].isdigit():
+                return
+            refs.append(name)
+
+        without_constants = VERILOG_SIZED_CONST_RE.sub(" ", expr)
+        without_escaped = VERILOG_ESCAPED_ID_RE.sub(" ", without_constants)
+        for match in VERILOG_ESCAPED_ID_RE.finditer(without_constants):
+            add_ref(match.group(0))
+        for match in VERILOG_SIMPLE_REF_RE.finditer(without_escaped):
+            add_ref(match.group(0))
+        return sorted(set(refs))
+
+    def _source_location_for_match(self, module_def: Dict[str, str], offset: int) -> str:
+        file_path = Path(module_def.get("file", ""))
+        module_text = module_def.get("text", "")
+        file_text = self.design_catalog["file_texts"].get(file_path, "")
+        module_start = file_text.find(module_text) if file_text and module_text else -1
+        absolute_offset = (module_start if module_start >= 0 else 0) + offset
+        line = file_text.count("\n", 0, absolute_offset) + 1 if file_text else 0
+        return f"{file_path}:{line}" if line else str(file_path)
+
+    def _build_source_assigns(self) -> Dict[str, Dict[str, SourceAssignInfo]]:
+        assigns: Dict[str, Dict[str, SourceAssignInfo]] = defaultdict(dict)
+        for module_name, definitions in self.design_catalog["modules_by_name"].items():
+            if not definitions:
+                continue
+            module_def = definitions[0]
+            module_text = module_def.get("text", "")
+            stripped_text = self._strip_comments(module_text)
+            for match in SOURCE_ASSIGN_RE.finditer(stripped_text):
+                lhs_raw = module_text[match.start("lhs") : match.end("lhs")]
+                rhs_raw = module_text[match.start("rhs") : match.end("rhs")]
+                lhs = self._source_lhs_name(lhs_raw)
+                if not lhs:
+                    continue
+                assigns[module_name][lhs] = SourceAssignInfo(
+                    module_name=module_name,
+                    lhs=lhs,
+                    rhs=rhs_raw.strip(),
+                    deps=self._source_expr_refs(rhs_raw),
+                    const_value=self._parse_source_constant(rhs_raw),
+                    location=self._source_location_for_match(module_def, match.start()),
+                )
+        return {module: dict(items) for module, items in assigns.items()}
 
     @staticmethod
     def _extract_port_name_from_decl(token: str) -> Optional[str]:
@@ -1256,19 +1394,55 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                         for output_bit in output_bits:
                             self._add_edge(
                                 self._node_key_for_ctx(ctx, input_bit),
-                                self._node_key_for_ctx(ctx, output_bit),
-                            )
+                            self._node_key_for_ctx(ctx, output_bit),
+                        )
+
+    def _source_direct_roots_for_signal(
+        self,
+        ctx: InstanceContext,
+        local_signal: str,
+    ) -> List[SourceDirectRoot]:
+        assigns = self.source_assigns.get(ctx.module_name, {})
+        found: Dict[str, SourceDirectRoot] = {}
+        visited: Set[str] = set()
+
+        def visit(signal_name: str) -> None:
+            signal_name = self._normalize_source_signal_token(signal_name)
+            if not signal_name or signal_name in visited:
+                return
+            visited.add(signal_name)
+
+            info = assigns.get(signal_name)
+            if info is None:
+                return
+            if info.const_value:
+                hier_signal = f"{ctx.path_str}.{signal_name}"
+                found[hier_signal] = SourceDirectRoot(
+                    signal=hier_signal,
+                    value=info.const_value,
+                    location=info.location,
+                    expression=f"assign {info.lhs} = {info.rhs};",
+                )
+                return
+
+            for dep in info.deps:
+                visit(dep)
+
+        visit(local_signal)
+        return [found[key] for key in sorted(found)]
 
     def _record_to_affected(self, record: SignalConstRecord) -> AffectedSignal:
         paths: List[PropagationPath] = []
         promoted_roots: List[str] = []
         seen_roots: Set[str] = set()
         ctx = self.raw_context_map.get(record.module)
+        source_direct_roots: List[SourceDirectRoot] = []
         bits: List[Bit] = []
         if ctx is not None:
             module_index = self.module_indices[ctx.module_name]
             leaf = record.hierarchical_signal.split(".")[-1]
             bits = module_index.name_to_bits.get(leaf, [])
+            source_direct_roots = self._source_direct_roots_for_signal(ctx, leaf)
 
         for raw_root_id in record.root_ids:
             root_id = self._promote_root_id(raw_root_id)
@@ -1297,6 +1471,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             roots=promoted_roots,
             reason=record.reason,
             propagation_paths=paths,
+            source_direct_roots=source_direct_roots,
         )
 
     def _signal_record_for_bits(
@@ -1997,6 +2172,16 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 for root_id in affected.roots
             }
         )
+        referenced_source_root_map: Dict[Tuple[str, str, str], SourceDirectRoot] = {}
+        for item in structural_items:
+            for affected in item.affected_signals:
+                for source_root in affected.source_direct_roots:
+                    key = (source_root.signal, source_root.value, source_root.location)
+                    referenced_source_root_map[key] = source_root
+        referenced_source_roots = [
+            referenced_source_root_map[key]
+            for key in sorted(referenced_source_root_map)
+        ]
 
         summary = {
             "removed_instance_count": len(removed_instances),
@@ -2004,6 +2189,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             "constantized_signal_count": len(constantized_signals),
             "affected_signal_count": total_affected_signals,
             "referenced_root_count": len(referenced_roots),
+            "referenced_source_direct_root_count": len(referenced_source_roots),
             "conflict_count": len(self.conflicts),
             "potential_issues": [],
         }
@@ -2027,6 +2213,10 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             summary["potential_issues"].append(
                 f"已将结构优化项关联到 {summary['referenced_root_count']} 个显式常量根源。"
             )
+        if summary["referenced_source_direct_root_count"] > 0:
+            summary["potential_issues"].append(
+                f"源码回溯发现 {summary['referenced_source_direct_root_count']} 个直接常量赋值根源。"
+            )
         if summary["conflict_count"] > 0:
             summary["potential_issues"].append(
                 f"raw 常量传播阶段发现 {summary['conflict_count']} 个冲突推断。"
@@ -2044,6 +2234,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             "removed_cells": [asdict(item) for item in removed_cells],
             "constantized_signals": [asdict(item) for item in constantized_signals],
             "referenced_roots": referenced_root_records,
+            "referenced_source_direct_roots": [asdict(root) for root in referenced_source_roots],
             "raw_constant_signal_count": len(self.raw_signal_records),
             "raw_conflicts": list(self.conflicts),
             "extra_exports": {
@@ -2055,6 +2246,26 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
 
     def build_json_report(self, analysis_results: Dict) -> Dict:
         summary = analysis_results["summary"]
+        def convert_source_root(root: Dict) -> Dict:
+            return {
+                "信号": root.get("signal", ""),
+                "常量值": root.get("value", ""),
+                "源码位置": root.get("location", ""),
+                "赋值语句": root.get("expression", ""),
+            }
+
+        def source_roots_from_affected(signals: List[Dict]) -> List[Dict]:
+            roots: Dict[Tuple[str, str, str], Dict] = {}
+            for affected in signals:
+                for root in affected.get("source_direct_roots", []):
+                    key = (
+                        root.get("signal", ""),
+                        root.get("value", ""),
+                        root.get("location", ""),
+                    )
+                    roots[key] = root
+            return [convert_source_root(roots[key]) for key in sorted(roots)]
+
         def convert_path(path_item: Dict) -> Dict:
             return {
                 "根源ID": path_item["root_id"],
@@ -2072,6 +2283,10 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 "根源": affected.get("roots", []),
                 "原因": affected.get("reason", ""),
                 "传播路径": [convert_path(item) for item in affected.get("propagation_paths", [])],
+                "源码直接常量根源": [
+                    convert_source_root(item)
+                    for item in affected.get("source_direct_roots", [])
+                ],
             }
 
         def convert_removed_item(item: Dict) -> Dict:
@@ -2095,6 +2310,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 "raw驱动": item.get("before_driver", ""),
                 "raw已折叠值": item.get("raw_folded_value", ""),
                 "优化后常量值": item.get("after_value", ""),
+                "源码直接常量根源": source_roots_from_affected(item.get("affected_signals", [])),
                 "受影响信号": [convert_affected(sig) for sig in item.get("affected_signals", [])],
             }
 
@@ -2124,6 +2340,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                     "优化后被直接常量化的信号数量": summary["constantized_signal_count"],
                     "受影响信号数量": summary["affected_signal_count"],
                     "关联到的显式根源数量": summary["referenced_root_count"],
+                    "源码直接常量根源数量": summary["referenced_source_direct_root_count"],
                     "raw传播冲突数量": summary["conflict_count"],
                     "潜在问题": list(summary["potential_issues"]),
                 },
@@ -2134,6 +2351,10 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                     for item in analysis_results["constantized_signals"]
                 ],
                 "关联到的显式常量根源": [convert_root(root) for root in analysis_results["referenced_roots"]],
+                "关联到的源码直接常量根源": [
+                    convert_source_root(root)
+                    for root in analysis_results["referenced_source_direct_roots"]
+                ],
                 "raw常量信号数量": analysis_results["raw_constant_signal_count"],
                 "raw传播冲突": analysis_results["raw_conflicts"],
                 "附加导出文件": {
@@ -2222,6 +2443,7 @@ def main() -> int:
             f"直接常量化信号={summary['constantized_signal_count']}，"
             f"受影响信号={summary['affected_signal_count']}，"
             f"关联根源={summary['referenced_root_count']}，"
+            f"源码直接根源={summary['referenced_source_direct_root_count']}，"
             f"冲突={summary['conflict_count']}"
         )
         print(f"\n输出目录: {output_dir}")
