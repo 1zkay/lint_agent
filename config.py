@@ -11,11 +11,14 @@ import re
 import logging
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 # 加载 .env 文件（位于本文件同目录；override=False 表示系统环境变量优先）
 _env_file = Path(__file__).resolve().parent / ".env"
-_env_keys_before_dotenv = set(os.environ)
+_image_env_values = {
+    key: str(value or "").strip()
+    for key, value in dotenv_values(_env_file).items()
+}
 load_dotenv(_env_file, override=False)
 
 logger = logging.getLogger(__name__)
@@ -44,6 +47,25 @@ class Config:
     def _slug_env_value(value: str, default: str = "value") -> str:
         slug = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
         return slug or default
+
+    @staticmethod
+    def _env_value(key: str) -> str:
+        return os.getenv(key, "").strip()
+
+    @staticmethod
+    def _image_env_value(key: str) -> str:
+        return _image_env_values.get(key, "").strip()
+
+    @classmethod
+    def _llm_key_differs_from_image_env(cls, key: str) -> bool:
+        return cls._env_value(key) != cls._image_env_value(key)
+
+    @classmethod
+    def _has_runtime_llm_override(cls, suffix: str = "") -> bool:
+        return any(
+            cls._llm_key_differs_from_image_env(f"{key}{suffix}")
+            for key in ("LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY", "LLM_LABEL")
+        )
 
     @staticmethod
     def _resolve_env_path(value: str, *, base_dir: Path) -> Path:
@@ -92,9 +114,10 @@ class Config:
     ) -> list[dict[str, str]]:
         presets: list[dict[str, str]] = []
         seen_ids: set[str] = set()
-        # If Compose/env_file supplies a customer LLM_MODEL, do not mix in
-        # additional preset models loaded later from the image-baked .env.
-        use_external_llm_presets = "LLM_MODEL" in _env_keys_before_dotenv
+        # Chainlit may load the image-baked .env before this module is imported.
+        # Compare current values with that file directly so customer overrides do
+        # not inherit built-in secondary presets by import-order accident.
+        use_runtime_llm_presets = cls._has_runtime_llm_override()
 
         def add_preset(label: str, model: str, base_url: str, api_key: str) -> None:
             model = model.strip()
@@ -127,7 +150,7 @@ class Config:
         while True:
             suffix = "" if index == 1 else f"_{index}"
             model_key = f"LLM_MODEL{suffix}"
-            if use_external_llm_presets and model_key not in _env_keys_before_dotenv:
+            if use_runtime_llm_presets and index > 1 and not cls._has_runtime_llm_override(suffix):
                 break
 
             model = os.getenv(model_key, "").strip()
