@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 
 # 加载 .env 文件（位于本文件同目录；override=False 表示系统环境变量优先）
 _env_file = Path(__file__).resolve().parent / ".env"
+_env_keys_before_dotenv = set(os.environ)
 load_dotenv(_env_file, override=False)
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,10 @@ class Config:
     ) -> list[dict[str, str]]:
         presets: list[dict[str, str]] = []
         seen_ids: set[str] = set()
+        # If Compose/env_file supplies a customer LLM_MODEL, do not mix in
+        # additional preset models loaded later from the image-baked .env.
+        use_external_llm_presets = "LLM_MODEL" in _env_keys_before_dotenv
+
         def add_preset(label: str, model: str, base_url: str, api_key: str) -> None:
             model = model.strip()
             if not model:
@@ -121,7 +126,11 @@ class Config:
         index = 1
         while True:
             suffix = "" if index == 1 else f"_{index}"
-            model = os.getenv(f"LLM_MODEL{suffix}", "").strip()
+            model_key = f"LLM_MODEL{suffix}"
+            if use_external_llm_presets and model_key not in _env_keys_before_dotenv:
+                break
+
+            model = os.getenv(model_key, "").strip()
             if not model:
                 if index == 1 and default_model:
                     model = default_model.strip()
