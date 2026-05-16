@@ -56,8 +56,5 @@ def build_chat_model_from_config(
 
     if ":" in cfg.llm_model:
         provider, model_name = cfg.llm_model.split(":", 1)
-        reasoning = getattr(cfg, "llm_reasoning", None)
-        if reasoning is not None:
-            kwargs["reasoning"] = reasoning
         return init_chat_model(model_name, model_provider=provider, **kwargs)
     return init_chat_model(cfg.llm_model, **kwargs)
