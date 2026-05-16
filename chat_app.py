@@ -123,6 +123,7 @@ register_chainlit_data_layer(cl)
 async def _send_model_chat_settings() -> None:
     presets = list(config.llm_model_presets or [])
     if len(presets) <= 1:
+        await ChatSettings([]).send()
         return
 
     current_preset_id = _resolve_llm_preset_id(cl.user_session.get("llm_preset_id"))
