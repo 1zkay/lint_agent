@@ -10,7 +10,7 @@
 说明：
 - 该工具依赖 Yosys 导出 normal JSON 与 noopt RTLIL 两种语义视图。
 - normal JSON 用于识别最终常量事实和跨层次传播；noopt RTLIL 用于保留直接常量根和模块内部组合依赖。
-- normal 已确认的层次边界常量会作为 noopt 归因种子；noopt 只在 normal 同值校验通过后沿实例端口传递根因，不新增最终常量事实。
+- normal 已确认但 noopt 未触达的模块输入会作为 noopt 兜底归因种子；noopt 只在 normal 同值校验通过后沿实例端口传递根因，不新增最终常量事实。
 - 报告重点是“根源常量 -> 层次污染集合”，而不是仅仅对比顶层优化前后差异。
 """
 
@@ -1176,35 +1176,29 @@ class ConstantTracer:
                     f"{self._hier_signal(ctx, signal_name)} 是直接常量根源",
                 )
 
-    def _noopt_boundary_seed_names(self, ctx: InstanceContext) -> Set[str]:
+    def _noopt_input_seed_names(self, ctx: InstanceContext) -> Set[str]:
         module_index = self.module_indices[ctx.module_name]
-        seed_names: Set[str] = set(module_index.port_directions)
-
-        for cell_data in module_index.cells.values():
-            if cell_data.get("type", "") not in self.module_indices:
-                continue
-            for bits in cell_data.get("connections", {}).values():
-                for bit in bits:
-                    if bit in CONST_BITS:
-                        continue
-                    seed_names.update(self._public_names(module_index, bit))
-
         return {
             name
-            for name in seed_names
+            for name, direction in module_index.port_directions.items()
             if name in module_index.name_to_bits and not name.startswith("$")
+            if direction in {"input", "inout"}
         }
 
-    def _seed_noopt_from_normal_boundary_constants(self) -> None:
-        """Use normal hierarchy-proven constants only as noopt attribution seeds.
+    def _seed_noopt_from_normal_input_constants(self) -> bool:
+        """Use normal-proven module input constants as noopt fallback seeds.
 
         normal JSON remains the source of truth for final constant facts.  These
-        seeds only bridge hierarchy-boundary constants into the noopt module-local
-        graph, so noopt can continue source-level attribution inside the module.
+        fallback seeds only bridge constants that noopt port propagation did not
+        reach into the module-local graph.
         """
+        changed = False
         for ctx in self.all_contexts_preorder:
             module_index = self.module_indices[ctx.module_name]
-            for signal_name in sorted(self._noopt_boundary_seed_names(ctx)):
+            for signal_name in sorted(self._noopt_input_seed_names(ctx)):
+                if self._noopt_key(ctx, signal_name) in self.noopt_const_map:
+                    continue
+
                 bits = module_index.name_to_bits.get(signal_name, [])
                 if len(bits) != 1:
                     continue
@@ -1225,17 +1219,18 @@ class ConstantTracer:
                 if not bit_values or len(bit_values) != 1:
                     continue
 
-                self._noopt_assign_const(
+                changed |= self._noopt_assign_const(
                     ctx,
                     signal_name,
                     bit_values[0],
                     root_ids,
                     (
-                        f"normal JSON 已确认层次边界信号 "
+                        f"normal JSON 已确认模块输入 "
                         f"{self._hier_signal(ctx, signal_name)} = {const_value}；"
-                        "作为 noopt RTLIL 模块内归因种子"
+                        "作为 noopt RTLIL 模块内归因兜底种子"
                     ),
                 )
+        return changed
 
     def _normal_confirms_noopt_state(
         self,
@@ -1533,13 +1528,7 @@ class ConstantTracer:
                 )
         return changed
 
-    def _run_noopt_fixpoint(self) -> None:
-        if not self.noopt_modules:
-            return
-
-        self._seed_noopt_direct_roots()
-        self._seed_noopt_from_normal_boundary_constants()
-
+    def _run_noopt_propagation_loop(self) -> None:
         changed = True
         guard = 0
         while changed:
@@ -1557,6 +1546,15 @@ class ConstantTracer:
                 changed |= self._propagate_noopt_child_to_parent(ctx)
                 changed |= self._propagate_noopt_local_comb(ctx)
                 changed |= self._propagate_noopt_connects(ctx)
+
+    def _run_noopt_fixpoint(self) -> None:
+        if not self.noopt_modules:
+            return
+
+        self._seed_noopt_direct_roots()
+        self._run_noopt_propagation_loop()
+        if self._seed_noopt_from_normal_input_constants():
+            self._run_noopt_propagation_loop()
 
     # ------------------------------------------------------------------
     # 固定点传播
@@ -2228,7 +2226,7 @@ class ConstantTracer:
                     "该工具会跨模块、跨实例向下和向上追踪常量传播。",
                     "对触发器、锁存器、存储器等时序单元默认作为传播边界，不把其输出直接判定为常量。",
                     "最终常量事实依据 normal Yosys JSON 识别；直接常量根和模块内部污染传播集合依据 read_verilog -noopt + proc -noopt 导出的 RTLIL 组合图追踪。",
-                    "normal JSON 已确认的层次边界常量会作为 noopt RTLIL 的归因种子；noopt 只在 normal 同值校验通过后沿实例端口传递根因，用于接上跨模块进入模块内部的源码级传播；noopt 不新增最终常量事实。",
+                    "normal JSON 已确认但 noopt 未触达的模块输入会作为 noopt RTLIL 的兜底归因种子；noopt 只在 normal 同值校验通过后沿实例端口传递根因，用于接上跨模块进入模块内部的源码级传播；noopt 不新增最终常量事实。",
                     "源码仅通过 Yosys src 属性作为定位上下文，不使用源码正则推断根因。",
                     "常量根因按信号连接点精确归属；若 noopt RTLIL 也无法保留依赖，报告不会把同值常量线网合并为候选根因。",
                 ],
