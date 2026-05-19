@@ -1024,8 +1024,6 @@ class ConstantTracer:
             return False
         key = self._node_key(ctx, bit)
         root_ids = set(root_ids)
-        if not root_ids:
-            return False
 
         current = self.const_map.get(key)
         if current is None:
@@ -1278,7 +1276,22 @@ class ConstantTracer:
                 if len(parent_tokens) != 1 or len(child_bits) != 1:
                     continue
 
-                parent_state = self._noopt_get_state(ctx, parent_tokens[0])
+                parent_token = parent_tokens[0]
+                parent_state = self._noopt_get_state(ctx, parent_token)
+                if (
+                    parent_state is not None
+                    and not parent_state.root_ids
+                    and parent_token.lower() in CONST_BITS
+                ):
+                    root_id = self._register_literal_root(
+                        ctx,
+                        f"{ctx.path_str}.{cell_name}.{port_name}[0]",
+                        self._const_to_str(parent_token.lower()),
+                    )
+                    parent_state = ConstEvidence(
+                        value=parent_token.lower(),
+                        root_ids={root_id},
+                    )
                 if parent_state is None or not parent_state.root_ids:
                     continue
                 if not self._normal_confirms_noopt_state(
@@ -1864,7 +1877,7 @@ class ConstantTracer:
                         ctx,
                         parent_bit,
                         f"{ctx.path_str}.{cell_name}.{port_name}[{index}]",
-                        create_literal_root=True,
+                        create_literal_root=False,
                     )
                     if evidence is None or child_bit in CONST_BITS:
                         continue
@@ -1901,7 +1914,7 @@ class ConstantTracer:
                         child_ctx,
                         child_bit,
                         f"{child_ctx.path_str}.{port_name}[{index}]",
-                        create_literal_root=True,
+                        create_literal_root=False,
                     )
                     if evidence is None or parent_bit in CONST_BITS:
                         continue
