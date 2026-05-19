@@ -9,7 +9,8 @@
 
 说明：
 - 该工具依赖 Yosys 导出 normal JSON 与 noopt RTLIL 两种语义视图。
-- normal JSON 用于识别最终常量事实；noopt RTLIL 用于保留直接常量根和组合依赖。
+- normal JSON 用于识别最终常量事实和跨层次传播；noopt RTLIL 用于保留直接常量根和模块内部组合依赖。
+- normal 已确认的层次边界常量会作为 noopt 归因种子；noopt 只在 normal 同值校验通过后沿实例端口传递根因，不新增最终常量事实。
 - 报告重点是“根源常量 -> 层次污染集合”，而不是仅仅对比顶层优化前后差异。
 """
 
@@ -1175,6 +1176,200 @@ class ConstantTracer:
                     f"{self._hier_signal(ctx, signal_name)} 是直接常量根源",
                 )
 
+    def _noopt_boundary_seed_names(self, ctx: InstanceContext) -> Set[str]:
+        module_index = self.module_indices[ctx.module_name]
+        seed_names: Set[str] = set(module_index.port_directions)
+
+        for cell_data in module_index.cells.values():
+            if cell_data.get("type", "") not in self.module_indices:
+                continue
+            for bits in cell_data.get("connections", {}).values():
+                for bit in bits:
+                    if bit in CONST_BITS:
+                        continue
+                    seed_names.update(self._public_names(module_index, bit))
+
+        return {
+            name
+            for name in seed_names
+            if name in module_index.name_to_bits and not name.startswith("$")
+        }
+
+    def _seed_noopt_from_normal_boundary_constants(self) -> None:
+        """Use normal hierarchy-proven constants only as noopt attribution seeds.
+
+        normal JSON remains the source of truth for final constant facts.  These
+        seeds only bridge hierarchy-boundary constants into the noopt module-local
+        graph, so noopt can continue source-level attribution inside the module.
+        """
+        for ctx in self.all_contexts_preorder:
+            module_index = self.module_indices[ctx.module_name]
+            for signal_name in sorted(self._noopt_boundary_seed_names(ctx)):
+                bits = module_index.name_to_bits.get(signal_name, [])
+                if len(bits) != 1:
+                    continue
+
+                resolved = self._resolve_signal_constant(
+                    ctx,
+                    bits,
+                    self._hier_signal(ctx, signal_name),
+                )
+                if resolved is None:
+                    continue
+
+                const_value, root_ids = resolved
+                if not root_ids:
+                    continue
+
+                bit_values = self._rtlil_const_to_bit_values(const_value)
+                if not bit_values or len(bit_values) != 1:
+                    continue
+
+                self._noopt_assign_const(
+                    ctx,
+                    signal_name,
+                    bit_values[0],
+                    root_ids,
+                    (
+                        f"normal JSON 已确认层次边界信号 "
+                        f"{self._hier_signal(ctx, signal_name)} = {const_value}；"
+                        "作为 noopt RTLIL 模块内归因种子"
+                    ),
+                )
+
+    def _normal_confirms_noopt_state(
+        self,
+        ctx: InstanceContext,
+        bits: List[Bit],
+        signal_name: str,
+        state: ConstEvidence,
+    ) -> bool:
+        resolved = self._resolve_signal_constant(
+            ctx,
+            bits,
+            self._hier_signal(ctx, signal_name),
+        )
+        if resolved is None:
+            return False
+
+        const_value, _ = resolved
+        return const_value == self._format_const_value([state.value])
+
+    def _propagate_noopt_parent_to_children(self, ctx: InstanceContext) -> bool:
+        changed = False
+        module_index = self.module_indices[ctx.module_name]
+        module = self.noopt_modules.get(ctx.module_name, {})
+        noopt_cells = {
+            cell.get("name", ""): cell
+            for cell in module.get("cells", [])
+            if cell.get("name")
+        }
+
+        for cell_name, cell_data in module_index.cells.items():
+            child_ctx = ctx.children.get(cell_name)
+            if child_ctx is None:
+                continue
+            noopt_cell = noopt_cells.get(cell_name)
+            if not noopt_cell:
+                continue
+
+            child_index = self.module_indices[child_ctx.module_name]
+            for port_name, direction in child_index.port_directions.items():
+                if direction not in {"input", "inout"}:
+                    continue
+
+                parent_tokens = noopt_cell.get("connections", {}).get(port_name, [])
+                child_bits = child_index.name_to_bits.get(port_name, [])
+                if len(parent_tokens) != 1 or len(child_bits) != 1:
+                    continue
+
+                parent_state = self._noopt_get_state(ctx, parent_tokens[0])
+                if parent_state is None or not parent_state.root_ids:
+                    continue
+                if not self._normal_confirms_noopt_state(
+                    child_ctx,
+                    child_bits,
+                    port_name,
+                    parent_state,
+                ):
+                    continue
+
+                changed |= self._noopt_assign_const(
+                    child_ctx,
+                    port_name,
+                    parent_state.value,
+                    parent_state.root_ids,
+                    (
+                        f"normal JSON 已确认跨层次输入 "
+                        f"{self._hier_signal(child_ctx, port_name)} = "
+                        f"{self._format_const_value([parent_state.value])}；"
+                        f"noopt RTLIL 从父实例 {ctx.path_str}.{cell_name}.{port_name} "
+                        "传入根因"
+                    ),
+                )
+
+        return changed
+
+    def _propagate_noopt_child_to_parent(self, ctx: InstanceContext) -> bool:
+        changed = False
+        module_index = self.module_indices[ctx.module_name]
+        module = self.noopt_modules.get(ctx.module_name, {})
+        noopt_cells = {
+            cell.get("name", ""): cell
+            for cell in module.get("cells", [])
+            if cell.get("name")
+        }
+
+        for cell_name, cell_data in module_index.cells.items():
+            child_ctx = ctx.children.get(cell_name)
+            if child_ctx is None:
+                continue
+            noopt_cell = noopt_cells.get(cell_name)
+            if not noopt_cell:
+                continue
+
+            child_index = self.module_indices[child_ctx.module_name]
+            for port_name, direction in child_index.port_directions.items():
+                if direction not in {"output", "inout"}:
+                    continue
+
+                child_bits = child_index.name_to_bits.get(port_name, [])
+                parent_tokens = noopt_cell.get("connections", {}).get(port_name, [])
+                if len(child_bits) != 1 or len(parent_tokens) != 1:
+                    continue
+
+                child_state = self._noopt_get_state(child_ctx, port_name)
+                if child_state is None or not child_state.root_ids:
+                    continue
+
+                parent_token = parent_tokens[0]
+                parent_bits = module_index.name_to_bits.get(parent_token, [])
+                if len(parent_bits) != 1:
+                    continue
+                if not self._normal_confirms_noopt_state(
+                    ctx,
+                    parent_bits,
+                    parent_token,
+                    child_state,
+                ):
+                    continue
+
+                changed |= self._noopt_assign_const(
+                    ctx,
+                    parent_token,
+                    child_state.value,
+                    child_state.root_ids,
+                    (
+                        f"normal JSON 已确认跨层次输出 "
+                        f"{self._hier_signal(ctx, parent_token)} = "
+                        f"{self._format_const_value([child_state.value])}；"
+                        f"noopt RTLIL 从子实例 {child_ctx.path_str}.{port_name} "
+                        "反传根因"
+                    ),
+                )
+
+        return changed
+
     @staticmethod
     def _expand_noopt_states(
         states: List[Optional[ConstEvidence]],
@@ -1343,6 +1538,7 @@ class ConstantTracer:
             return
 
         self._seed_noopt_direct_roots()
+        self._seed_noopt_from_normal_boundary_constants()
 
         changed = True
         guard = 0
@@ -1353,6 +1549,12 @@ class ConstantTracer:
                 raise RuntimeError("noopt RTLIL 常量传播固定点迭代次数异常。")
 
             for ctx in self.all_contexts_preorder:
+                changed |= self._propagate_noopt_parent_to_children(ctx)
+                changed |= self._propagate_noopt_local_comb(ctx)
+                changed |= self._propagate_noopt_connects(ctx)
+
+            for ctx in self.all_contexts_postorder:
+                changed |= self._propagate_noopt_child_to_parent(ctx)
                 changed |= self._propagate_noopt_local_comb(ctx)
                 changed |= self._propagate_noopt_connects(ctx)
 
@@ -2025,7 +2227,8 @@ class ConstantTracer:
                 "分析边界": [
                     "该工具会跨模块、跨实例向下和向上追踪常量传播。",
                     "对触发器、锁存器、存储器等时序单元默认作为传播边界，不把其输出直接判定为常量。",
-                    "最终常量事实依据 normal Yosys JSON 识别；直接常量根和污染传播集合依据 read_verilog -noopt + proc -noopt 导出的 RTLIL 组合图追踪。",
+                    "最终常量事实依据 normal Yosys JSON 识别；直接常量根和模块内部污染传播集合依据 read_verilog -noopt + proc -noopt 导出的 RTLIL 组合图追踪。",
+                    "normal JSON 已确认的层次边界常量会作为 noopt RTLIL 的归因种子；noopt 只在 normal 同值校验通过后沿实例端口传递根因，用于接上跨模块进入模块内部的源码级传播；noopt 不新增最终常量事实。",
                     "源码仅通过 Yosys src 属性作为定位上下文，不使用源码正则推断根因。",
                     "常量根因按信号连接点精确归属；若 noopt RTLIL 也无法保留依赖，报告不会把同值常量线网合并为候选根因。",
                 ],
