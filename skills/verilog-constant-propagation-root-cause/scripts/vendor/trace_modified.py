@@ -25,7 +25,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple, Union
 
 Bit = Union[int, str]
 CONST_BITS = {"0", "1"}
@@ -473,8 +473,10 @@ class ConstantTracer:
         current_module: Optional[str] = None
         current_cell: Optional[Dict] = None
         skip_block_depth = 0
+        pending_src = ""
 
         cell_re = re.compile(r"^\s*cell\s+(?P<type>\\\S+|\S+)\s+(?P<name>\\\S+|\S+)")
+        src_attr_re = re.compile(r'^\s*attribute\s+\\src\s+"(?P<src>.*)"\s*$')
 
         for line in rtlil_text.splitlines():
             module_match = RTLIL_MODULE_RE.match(line)
@@ -482,6 +484,7 @@ class ConstantTracer:
                 current_module = self._rtlil_name_to_plain(module_match.group("name"))
                 current_cell = None
                 skip_block_depth = 0
+                pending_src = ""
                 continue
 
             if current_module is None:
@@ -517,13 +520,20 @@ class ConstantTracer:
                 current_module = None
                 continue
 
+            src_attr_match = src_attr_re.match(line)
+            if src_attr_match:
+                pending_src = src_attr_match.group("src")
+                continue
+
             cell_match = cell_re.match(line)
             if cell_match:
                 current_cell = {
                     "type": self._rtlil_name_to_plain(cell_match.group("type")),
                     "name": self._rtlil_name_to_plain(cell_match.group("name")),
+                    "src": self._original_yosys_src(pending_src),
                     "connections": {},
                 }
+                pending_src = ""
                 continue
 
             if re.match(r"^\s*(?:process|memory)\s+", line):
@@ -652,7 +662,6 @@ class ConstantTracer:
     def _build_context_tree(self) -> None:
         self.all_contexts_preorder = []
         self.all_contexts_postorder = []
-        stack_guard: List[str] = []
 
         if self.top_module not in self.module_indices:
             available = ", ".join(sorted(self.module_indices)[:20])
@@ -663,27 +672,30 @@ class ConstantTracer:
                 f"Available modules: {available}"
             )
 
-        def visit(module_name: str, path: Tuple[str, ...]) -> InstanceContext:
+        def visit(
+            module_name: str,
+            path: Tuple[str, ...],
+            ancestors: FrozenSet[str],
+        ) -> InstanceContext:
             ctx = InstanceContext(module_name=module_name, path=path)
             self.all_contexts_preorder.append(ctx)
-            stack_guard.append(module_name)
 
+            next_ancestors = ancestors | {module_name}
             module_index = self.module_indices[module_name]
             for cell_name, cell_data in module_index.cells.items():
                 cell_type = cell_data.get("type", "")
                 if cell_type not in self.module_indices:
                     continue
-                if cell_type in stack_guard:
+                if cell_type in next_ancestors:
                     # 保守跳过递归层次
                     continue
-                child_ctx = visit(cell_type, path + (cell_name,))
+                child_ctx = visit(cell_type, path + (cell_name,), next_ancestors)
                 ctx.children[cell_name] = child_ctx
 
-            stack_guard.pop()
             self.all_contexts_postorder.append(ctx)
             return ctx
 
-        self.root_context = visit(self.top_module, (self.top_module,))
+        self.root_context = visit(self.top_module, (self.top_module,), frozenset())
 
     # ------------------------------------------------------------------
     # 信号/根因辅助

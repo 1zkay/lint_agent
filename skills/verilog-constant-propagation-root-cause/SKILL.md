@@ -40,6 +40,8 @@ python skills/verilog-constant-propagation-root-cause/scripts/run_constant_trace
   - `trace_removed_path_report.json`
   - `diagnosis_bundle.json`
   - `raw_design.json`
+  - `opt_design.json`
+  - `noopt_proc.il`
   - `raw_proc.il`
   - `opt_proc.il`
 
@@ -49,12 +51,13 @@ python skills/verilog-constant-propagation-root-cause/scripts/run_constant_trace
 - Then read `trace_removed_path_report.json`.
 - Focus on:
   - Summary counts
-  - Removed local cells and removed instances
+  - `源码相比优化后少掉的逻辑`
+  - Whether each missing logic group is marked as caused by constant propagation
   - Signals that become direct constants after optimization
   - Associated explicit roots
-  - Source-level direct constant roots (`源码直接常量根源`) on each removed/constantized item
-- Treat `raw_proc.il`, `opt_proc.il`, and source code as required evidence for the final diagnosis, not optional extras.
-- Only open `raw_design.json` when the report is not enough to explain a root or a removed item.
+  - Source snippets and source locations on each missing logic item
+- Treat `trace_removed_path_report.json`, `raw_design.json`, `noopt_proc.il`, and source code as required evidence for the final diagnosis.
+- Use `raw_proc.il` and `opt_proc.il` only when the simplified missing-logic evidence is not enough to explain the optimization result.
 
 ### 3. Decide whether a root is a real defect or a design-intended constant
 
@@ -67,27 +70,26 @@ python skills/verilog-constant-propagation-root-cause/scripts/run_constant_trace
   - The source code around the root does not contain a clear comment or configuration reason for tying it off.
 - Be conservative about declaring a real defect when the root is clearly a configuration constant, architectural constant, or protocol-required tie-off.
 
-### 4. Use before/after RTLIL only for evidence
+### 4. Use noopt vs opt as the user-facing source/optimization comparison
 
-- `raw_proc.il` is the pre-optimization structural view after `proc`.
+- `noopt_proc.il` is the source-like structural view that preserves combinational logic from the source.
 - `opt_proc.il` is the post-optimization structural view after `proc` and `opt`.
-- Use them to confirm:
-  - which local cells existed before optimization,
-  - which ones disappeared after optimization,
-  - which output signals are rewired to direct constants after optimization,
-  - and whether the removed or constantized logic matches the claimed source-level direct constant roots and polluted path.
-- Do not manually diff the whole files line-by-line unless necessary. Start from the removed item path, constantized signal path, or the relevant source location from the report.
+- Prefer the report field `源码相比优化后少掉的逻辑` to answer:
+  - which source-level combinational cells disappeared after optimization,
+  - which output became constant,
+  - and whether the disappearance is caused by constant propagation roots.
+- Do not manually diff the whole RTLIL files unless necessary. Start from the missing logic group, signal path, or source location from the report.
 
 ### 5. Final diagnosis is mandatory
 
 - Do not stop after reading the JSON report.
 - The final diagnosis must combine:
-  - `trace_removed_path_report.json`, especially each item's `源码直接常量根源` field when present
-  - `raw_proc.il`
-  - `opt_proc.il`
+  - `trace_removed_path_report.json`, especially `源码相比优化后少掉的逻辑`
+  - `raw_design.json`
+  - `noopt_proc.il`
   - source files around the root and the polluted modules
-- A result is not complete until the agent checks whether the removed logic seen in RTLIL matches the root and the source-level intent.
-- If the report contains no removed cells but does contain constantized signals, treat those signal entries as the structural optimization evidence.
+- A result is not complete until the agent checks whether the logic missing after optimization matches the root and the source-level intent.
+- If the report contains missing logic groups, treat those groups as the structural optimization evidence.
 
 ### 6. Write the final Chinese JSON diagnosis
 
@@ -102,30 +104,30 @@ python skills/verilog-constant-propagation-root-cause/scripts/run_constant_trace
 
 ```json
 {
-  "summary": {
-    "top_module": "top",
-    "input_paths": ["rtl"],
-    "artifact_dir": "reports/constant_propagation_20260428_153000",
-    "real_defect_count": 1,
-    "intended_constant_count": 2,
-    "output_path": "reports/constant_propagation_20260428_153000/constant_propagation_diagnosis.json"
+  "摘要": {
+    "顶层模块": "top",
+    "输入路径": ["rtl"],
+    "产物目录": "reports/constant_propagation_20260428_153000",
+    "疑似真实缺陷数量": 1,
+    "设计预期常量数量": 2,
+    "输出路径": "reports/constant_propagation_20260428_153000/constant_propagation_diagnosis.json"
   },
-  "findings": [
+  "发现项": [
     {
-      "id": "CP_001",
-      "category": "疑似真实缺陷",
-      "root_signal": "parent_cfg_force_zero",
-      "root_module": "top",
-      "affected_modules": ["u_child"],
-      "polluted_signals": ["valid_i", "enable_i"],
-      "removed_logic": ["u_child.$procmux$12"],
-      "evidence": {
-        "report_item": "trace_removed_path_report.json 中对应根源和删除项/常量化信号",
-        "rtlil_evidence": "raw_proc.il 中存在相关逻辑，opt_proc.il 中被删除或输出被改接为常量",
-        "source_evidence": "源码中该控制信号被上层常量连接，未看到明确配置意图"
+      "编号": "CP_001",
+      "类别": "疑似真实缺陷",
+      "根源信号": "parent_cfg_force_zero",
+      "根源模块": "top",
+      "受影响模块": ["u_child"],
+      "污染信号": ["valid_i", "enable_i"],
+      "少掉的逻辑": ["u_child.$procmux$12"],
+      "证据": {
+        "报告证据": "trace_removed_path_report.json 中的“源码相比优化后少掉的逻辑”",
+        "RTLIL证据": "noopt_proc.il 中存在相关源码组合逻辑，opt_proc.il 中对应输出被改接为常量",
+        "源码证据": "源码中该控制信号被上层常量连接，未看到明确配置意图"
       },
-      "diagnosis": "上层常量连接污染子模块控制路径，导致下游逻辑被优化删除，疑似非预期常量传播。",
-      "confirmation_needed": [
+      "诊断": "上层常量连接污染子模块控制路径，导致下游逻辑被优化删除，疑似非预期常量传播。",
+      "需要确认": [
         "确认该控制信号是否本应固定为常量。"
       ]
     }
@@ -135,21 +137,21 @@ python skills/verilog-constant-propagation-root-cause/scripts/run_constant_trace
 
 Field rules:
 
-- Keep JSON keys stable in English, but write all diagnosis text in Chinese.
-- `summary` must contain only top module, inputs, artifact directory, counts, and output path.
-- `findings` must contain only likely real defects or clearly important intended constants.
-- Use `category` values `疑似真实缺陷` or `设计预期常量`.
-- `diagnosis` must be concise and evidence-based.
-- `evidence` must cite only facts from `trace_removed_path_report.json`, `raw_proc.il`, `opt_proc.il`, and source code.
+- JSON keys and diagnosis text must both be Chinese.
+- `摘要` must contain only top module, inputs, artifact directory, counts, and output path.
+- `发现项` must contain only likely real defects or clearly important intended constants.
+- Use `类别` values `疑似真实缺陷` or `设计预期常量`.
+- `诊断` must be concise and evidence-based.
+- `证据` must cite only facts from `trace_removed_path_report.json`, `raw_design.json`, `noopt_proc.il`, optional `raw_proc.il`/`opt_proc.il`, and source code.
 - Do not include broad RTL optimization background or generic constant-propagation explanation.
-- If no likely real defect is found, write `"findings": []` and set `real_defect_count` to `0`.
+- If no likely real defect is found, write `"发现项": []` and set `疑似真实缺陷数量` to `0`.
 
 ## Guardrails
 
 - Do not treat every constant root as a defect.
 - Do not rely only on signal names. Read the source around the root and the polluted modules.
 - Do not claim a parent-module named root unless the detector already promoted it or the source clearly proves it.
-- Do not ignore removed-item or constantized-signal evidence; the detector is intentionally filtered to constants that already caused structural optimization.
+- Do not ignore `源码相比优化后少掉的逻辑`; the detector is intentionally filtered to source logic that already disappeared after optimization.
 - Do not spend time manually reading the full `raw_design.json` unless the report and source are insufficient.
 
 ## References

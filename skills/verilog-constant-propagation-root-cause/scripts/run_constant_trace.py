@@ -82,10 +82,10 @@ def build_diagnosis_bundle(
             "opt_proc_rtlil",
         ],
         "final_diagnosis_workflow": [
-            "先读取 JSON 报告，确定显式根源、被删除项、被直接常量化的信号和代表性受影响信号。",
+            "先读取 JSON 报告，重点查看“源码相比优化后少掉的逻辑”。",
             "再对照 raw_design.json 和 noopt_proc.il，确认最终常量事实、直接常量根和未优化组合传播链。",
-            "需要复核优化差分细节时，再读取 opt_design.json、raw_proc.il 和 opt_proc.il。",
-            "最后回到源代码，阅读根源模块和被污染子模块附近的源码，判断这是设计预期常量还是疑似真实缺陷。",
+            "需要复核优化结果时，再读取 opt_design.json、raw_proc.il 和 opt_proc.il。",
+            "最后回到源代码，阅读根源和少掉逻辑附近的源码，判断这是设计预期常量还是疑似真实缺陷。",
         ],
     }
     bundle_path.write_text(
