@@ -65,18 +65,26 @@ def build_diagnosis_bundle(
         "artifacts": {
             "report_json": str(output_path.resolve()),
             "raw_design_json": str((output_dir / "raw_design.json").resolve()),
+            "opt_design_json": str((output_dir / "opt_design.json").resolve()),
+            "noopt_proc_rtlil": str((output_dir / "noopt_proc.il").resolve()),
             "raw_proc_rtlil": str((output_dir / "raw_proc.il").resolve()),
             "opt_proc_rtlil": str((output_dir / "opt_proc.il").resolve()),
         },
         "final_diagnosis_required_inputs": [
             "json_report",
+            "raw_design_json",
+            "noopt_proc_rtlil",
+            "source_code",
+        ],
+        "final_diagnosis_optional_audit_inputs": [
+            "opt_design_json",
             "raw_proc_rtlil",
             "opt_proc_rtlil",
-            "source_code",
         ],
         "final_diagnosis_workflow": [
             "先读取 JSON 报告，确定显式根源、被删除项、被直接常量化的信号和代表性受影响信号。",
-            "再对照 raw_proc.il 和 opt_proc.il，确认优化前后哪些局部单元或实例被删除，或哪些输出被改接为常量。",
+            "再对照 raw_design.json 和 noopt_proc.il，确认最终常量事实、直接常量根和未优化组合传播链。",
+            "需要复核优化差分细节时，再读取 opt_design.json、raw_proc.il 和 opt_proc.il。",
             "最后回到源代码，阅读根源模块和被污染子模块附近的源码，判断这是设计预期常量还是疑似真实缺陷。",
         ],
     }

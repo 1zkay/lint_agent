@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Hierarchical raw_proc/opt_proc diff based constant propagation tracer.
+"""Hierarchical raw/opt Yosys diff based constant propagation tracer.
 
 This script uses a different strategy from trace_modified.py:
-1. Export a hierarchical raw_proc RTLIL design and an optimized RTLIL design.
-2. Compare raw_proc vs opt_proc hierarchy to find removed module instances
-   and removed local combinational cells.
+1. Export hierarchical raw/opt Yosys JSON designs, noopt RTLIL for root
+   provenance, and raw/opt RTLIL only for optimization driver diff evidence.
+2. Compare raw vs opt JSON hierarchy to find removed module instances and
+   removed local combinational cells.
 3. Run the raw hierarchical constant-propagation analysis from
    trace_modified.py.
 4. For each removed item, inspect the raw outputs that became constant and
@@ -26,118 +27,12 @@ from trace_modified import (
     COMB_CELL_TYPES,
     CONST_BITS,
     ConstantTracer,
-    EXPLICIT_SOURCE_TYPES,
     InstanceContext,
-    RootCause,
     SignalConstRecord,
-    VERILOG_PRIMITIVES,
 )
-
-SOURCE_INSTANCE_STMT_RE = re.compile(
-    r"^\s*([A-Za-z_][A-Za-z0-9_$]*)\s+"
-    r"(?:#\s*\([^;]*?\)\s*)?"
-    r"([A-Za-z_][A-Za-z0-9_$]*)\s*\((.*?)\)\s*;",
-    re.MULTILINE | re.DOTALL,
-)
-
-SUPPORTED_SOURCE_PRIMITIVES = {
-    "and",
-    "buf",
-    "nand",
-    "nor",
-    "not",
-    "or",
-    "xnor",
-    "xor",
-}
-
-RTLIL_TO_SOURCE_PRIMITIVE = {
-    "$_AND_": "and",
-    "$_BUF_": "buf",
-    "$_NAND_": "nand",
-    "$_NOR_": "nor",
-    "$_NOT_": "not",
-    "$_OR_": "or",
-    "$_XNOR_": "xnor",
-    "$_XOR_": "xor",
-    "$and": "and",
-    "$buf": "buf",
-    "$nand": "nand",
-    "$nor": "nor",
-    "$not": "not",
-    "$or": "or",
-    "$xnor": "xnor",
-    "$xor": "xor",
-}
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_REPORT_ROOT = PROJECT_ROOT / "reports" / "gate_error_reports"
-SIMPLE_CONNECTION_EXPR_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_$]*)(\[\d+\])?\s*$")
-SIMPLE_SIGNAL_REF_RE = re.compile(
-    r"^\s*([A-Za-z_][A-Za-z0-9_$]*)(?:\[(\d+)(?::(\d+))?\])?\s*$"
-)
-FUNCTION_CALL_RE = re.compile(r"^\s*([$A-Za-z_][A-Za-z0-9_$:]*)\s*\((.*)\)\s*$", re.DOTALL)
-NAMED_PORT_ARG_RE = re.compile(r"^\.\s*([A-Za-z_][A-Za-z0-9_$]*)\s*\(\s*(.*?)\s*\)$", re.DOTALL)
-PORT_DECL_NAME_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_$]*)\s*$")
-UNARY_EXPR_PREFIXES = ("~&", "~|", "~^", "^~", "!", "~", "&", "|", "^", "+", "-")
-BINARY_EXPR_OPERATORS = (
-    "||",
-    "&&",
-    "|",
-    "^~",
-    "~^",
-    "^",
-    "&",
-    "===",
-    "!==",
-    "==",
-    "!=",
-    "<=",
-    ">=",
-    "<<<",
-    ">>>",
-    "<<",
-    ">>",
-    "<",
-    ">",
-    "+",
-    "-",
-    "*",
-    "/",
-    "%",
-)
-
-SOURCE_ASSIGN_RE = re.compile(r"\bassign\s+(?P<lhs>.*?)\s*=\s*(?P<rhs>.*?);", re.DOTALL)
-VERILOG_ESCAPED_ID_RE = re.compile(r"\\\S+")
-VERILOG_SIZED_CONST_RE = re.compile(
-    r"\b\d+\s*'\s*[bBdDhHoO]\s*[0-9a-fA-F_xXzZ_]+\b"
-)
-VERILOG_SIMPLE_REF_RE = re.compile(
-    r"\b[A-Za-z_][A-Za-z0-9_$]*(?:\s*\[\s*\d+\s*(?::\s*\d+\s*)?\])?"
-)
-SOURCE_EXPR_KEYWORDS = {
-    "assign",
-    "case",
-    "casex",
-    "casez",
-    "default",
-    "else",
-    "end",
-    "endcase",
-    "endfunction",
-    "endmodule",
-    "function",
-    "if",
-    "input",
-    "inout",
-    "localparam",
-    "logic",
-    "module",
-    "output",
-    "parameter",
-    "reg",
-    "wire",
-}
 
 
 @dataclass
@@ -157,7 +52,6 @@ class AffectedSignal:
     roots: List[str] = field(default_factory=list)
     reason: str = ""
     propagation_paths: List[PropagationPath] = field(default_factory=list)
-    source_direct_roots: List["SourceDirectRoot"] = field(default_factory=list)
 
 
 @dataclass
@@ -184,59 +78,35 @@ class ConstantizedSignalItem:
     affected_signals: List[AffectedSignal] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class SourceDirectRoot:
-    signal: str
-    value: str
-    location: str = ""
-    expression: str = ""
-
-
 @dataclass
-class SourceAssignInfo:
-    module_name: str
-    lhs: str
-    rhs: str
-    deps: List[str] = field(default_factory=list)
-    const_value: str = ""
-    location: str = ""
-
-
-@dataclass
-class SourcePrimitiveCell:
-    module_name: str
-    instance_name: str
-    primitive_type: str
-    output_signal: str
-    input_signals: List[str] = field(default_factory=list)
-    src: str = ""
-
-
-@dataclass
-class RtlilCellInfo:
+class YosysCellInfo:
     name: str
     cell_type: str
     src: str = ""
-    connections: Dict[str, List[str]] = field(default_factory=dict)
+    connections: Dict[str, List[Bit]] = field(default_factory=dict)
+    port_directions: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
-class RtlilModuleInfo:
+class YosysModuleInfo:
     name: str
-    cells: Dict[str, RtlilCellInfo] = field(default_factory=dict)
+    cells: Dict[str, YosysCellInfo] = field(default_factory=dict)
     connects: List[Tuple[List[str], List[str]]] = field(default_factory=list)
     inputs: Set[str] = field(default_factory=set)
     outputs: Set[str] = field(default_factory=set)
+    name_to_bits: Dict[str, List[Bit]] = field(default_factory=dict)
+    bit_to_names: Dict[Bit, List[str]] = field(default_factory=lambda: defaultdict(list))
 
 
 class OptimizationDiffRemovedTracer(ConstantTracer):
-    """Compare raw_proc/opt_proc hierarchy and backtrace removed items to roots."""
+    """Compare raw/opt Yosys structures and backtrace removed items to roots."""
 
     def __init__(self, design_inputs, top_module: str = "top_module", yosys_bin: Optional[str] = None):
         super().__init__(design_inputs, top_module, yosys_bin)
         self.raw_netlist_data: Dict = {}
-        self.before_rtlil_modules: Dict[str, RtlilModuleInfo] = {}
-        self.opt_rtlil_modules: Dict[str, RtlilModuleInfo] = {}
+        self.opt_netlist_data: Dict = {}
+        self.before_modules: Dict[str, YosysModuleInfo] = {}
+        self.opt_modules: Dict[str, YosysModuleInfo] = {}
         self.before_contexts_preorder: List[InstanceContext] = []
         self.opt_contexts_preorder: List[InstanceContext] = []
 
@@ -246,34 +116,30 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
         self.raw_signal_map: Dict[str, SignalConstRecord] = {}
         self.prepared_source_map: Dict[str, str] = {}
         self.raw_json_text: str = ""
+        self.opt_json_text: str = ""
         self.raw_proc_rtlil_text: str = ""
         self.opt_proc_rtlil_text: str = ""
-        self.source_primitive_cells: Dict[str, List[SourcePrimitiveCell]] = (
-            self._build_source_primitive_cells()
-        )
-        self.source_module_ports: Dict[str, List[str]] = self._build_source_module_ports()
-        self.source_instance_connections: Dict[str, Dict[str, Dict[str, str]]] = (
-            self._build_source_instance_connections()
-        )
-        self.source_assigns: Dict[str, Dict[str, SourceAssignInfo]] = self._build_source_assigns()
-        self.literal_root_promotion_cache: Dict[str, str] = {}
-        self.promoted_root_origins: Dict[str, Set[str]] = defaultdict(set)
+        self.noopt_proc_rtlil_text: str = ""
 
         self.forward_graph: Dict[Tuple[str, Bit], Set[Tuple[str, Bit]]] = defaultdict(set)
         self.reverse_graph: Dict[Tuple[str, Bit], Set[Tuple[str, Bit]]] = defaultdict(set)
 
     def _reset_constant_state(self) -> None:
         self.root_causes = {}
-        self.context_direct_roots = defaultdict(lambda: defaultdict(set))
+        self.context_signal_direct_roots = defaultdict(lambda: defaultdict(set))
         self.const_map = {}
         self.reason_map = {}
+        self.noopt_const_map = {}
+        self.noopt_reason_map = {}
         self.conflicts = []
 
-    def _export_raw_opt_jsons(self) -> None:
+    def _export_yosys_designs(self) -> None:
         with tempfile.TemporaryDirectory(prefix="trace_removed_path_") as tempdir:
             raw_json = Path(tempdir) / "raw_design.json"
+            opt_json = Path(tempdir) / "opt_design.json"
             raw_proc_rtlil = Path(tempdir) / "raw_proc.il"
             opt_proc_rtlil = Path(tempdir) / "opt_proc.il"
+            noopt_proc_rtlil = Path(tempdir) / "noopt_proc.il"
             source_dir = Path(tempdir) / "sources"
             source_dir.mkdir(parents=True, exist_ok=True)
             prepared_files = self._prepare_design_sources(source_dir)
@@ -297,634 +163,49 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 f"hierarchy -check -top {self.top_module}; "
                 "proc; "
                 "opt -purge; "
+                f"write_json {self._yosys_path(opt_json)}; "
                 f"write_rtlil {self._yosys_path(opt_proc_rtlil)}; "
                 "stat"
             )
             result = self._run_yosys(opt_script, timeout=120)
             self.yosys_stat = result.stdout
 
+            noopt_script = (
+                f"{self._read_verilog_cmd(prepared_files, noopt=True)}"
+                f"hierarchy -check -top {self.top_module}; "
+                "proc -noopt; "
+                f"write_rtlil {self._yosys_path(noopt_proc_rtlil)}"
+            )
+            self._run_yosys(noopt_script, timeout=120)
+
             self.raw_json_text = raw_json.read_text(encoding="utf-8")
+            self.opt_json_text = opt_json.read_text(encoding="utf-8")
             self.raw_netlist_data = json.loads(self.raw_json_text)
+            self.opt_netlist_data = json.loads(self.opt_json_text)
             self.raw_proc_rtlil_text = raw_proc_rtlil.read_text(encoding="utf-8", errors="ignore")
+            self.raw_rtlil_text = self.raw_proc_rtlil_text
             self.opt_proc_rtlil_text = opt_proc_rtlil.read_text(encoding="utf-8", errors="ignore")
-            self.before_rtlil_modules = self._parse_rtlil_modules(self.raw_proc_rtlil_text)
-            self.opt_rtlil_modules = self._parse_rtlil_modules(self.opt_proc_rtlil_text)
+            self.noopt_proc_rtlil_text = noopt_proc_rtlil.read_text(
+                encoding="utf-8",
+                errors="ignore",
+            )
+            self.noopt_rtlil_text = self.noopt_proc_rtlil_text
+            self.noopt_modules = self._parse_noopt_rtlil_modules(self.noopt_rtlil_text)
+            self._index_noopt_direct_constant_connections()
+            self.before_modules = self._build_yosys_modules(
+                self.raw_netlist_data,
+                self.raw_proc_rtlil_text,
+            )
+            self.opt_modules = self._build_yosys_modules(
+                self.opt_netlist_data,
+                self.opt_proc_rtlil_text,
+            )
 
         self.modules_data = self.raw_netlist_data.get("modules", {})
 
     @staticmethod
     def _context_map(contexts: Iterable[InstanceContext]) -> Dict[str, InstanceContext]:
         return {ctx.path_str: ctx for ctx in contexts}
-
-    @staticmethod
-    def _split_top_level_args(text: str) -> List[str]:
-        args: List[str] = []
-        current: List[str] = []
-        depth_paren = 0
-        depth_brace = 0
-        depth_bracket = 0
-
-        for char in text:
-            if char == "," and depth_paren == 0 and depth_brace == 0 and depth_bracket == 0:
-                token = "".join(current).strip()
-                if token:
-                    args.append(token)
-                current = []
-                continue
-
-            current.append(char)
-            if char == "(":
-                depth_paren += 1
-            elif char == ")":
-                depth_paren = max(0, depth_paren - 1)
-            elif char == "{":
-                depth_brace += 1
-            elif char == "}":
-                depth_brace = max(0, depth_brace - 1)
-            elif char == "[":
-                depth_bracket += 1
-            elif char == "]":
-                depth_bracket = max(0, depth_bracket - 1)
-
-        token = "".join(current).strip()
-        if token:
-            args.append(token)
-        return args
-
-    @staticmethod
-    def _normalize_source_signal_token(token: str) -> str:
-        token = token.strip()
-        if token.startswith("\\"):
-            token = token[1:]
-        return re.sub(r"\s+", "", token.strip())
-
-    @staticmethod
-    def _source_lhs_name(expr: str) -> Optional[str]:
-        token = expr.strip()
-        if not token or any(ch in token for ch in "{},()"):
-            return None
-        if token.startswith("\\"):
-            return OptimizationDiffRemovedTracer._normalize_source_signal_token(token)
-        if VERILOG_SIMPLE_REF_RE.fullmatch(token):
-            return OptimizationDiffRemovedTracer._normalize_source_signal_token(token)
-        return None
-
-    @staticmethod
-    def _parse_source_constant(expr: str) -> str:
-        token = expr.strip()
-        match = re.fullmatch(
-            r"(\d+)\s*'\s*([bBdDhHoO])\s*([0-9a-fA-F_xXzZ_]+)",
-            token,
-        )
-        if not match:
-            return ""
-        width, base, digits = match.groups()
-        return f"{width}'{base.lower()}{digits.replace('_', '').lower()}"
-
-    @staticmethod
-    def _source_expr_refs(expr: str) -> List[str]:
-        refs: List[str] = []
-
-        def add_ref(raw: str) -> None:
-            name = OptimizationDiffRemovedTracer._normalize_source_signal_token(raw)
-            if not name:
-                return
-            base = name.split("[", 1)[0]
-            if base in SOURCE_EXPR_KEYWORDS:
-                return
-            if base[0].isdigit():
-                return
-            refs.append(name)
-
-        without_constants = VERILOG_SIZED_CONST_RE.sub(" ", expr)
-        without_escaped = VERILOG_ESCAPED_ID_RE.sub(" ", without_constants)
-        for match in VERILOG_ESCAPED_ID_RE.finditer(without_constants):
-            add_ref(match.group(0))
-        for match in VERILOG_SIMPLE_REF_RE.finditer(without_escaped):
-            add_ref(match.group(0))
-        return sorted(set(refs))
-
-    def _source_location_for_match(self, module_def: Dict[str, str], offset: int) -> str:
-        file_path = Path(module_def.get("file", ""))
-        module_text = module_def.get("text", "")
-        file_text = self.design_catalog["file_texts"].get(file_path, "")
-        module_start = file_text.find(module_text) if file_text and module_text else -1
-        absolute_offset = (module_start if module_start >= 0 else 0) + offset
-        line = file_text.count("\n", 0, absolute_offset) + 1 if file_text else 0
-        return f"{file_path}:{line}" if line else str(file_path)
-
-    def _build_source_assigns(self) -> Dict[str, Dict[str, SourceAssignInfo]]:
-        assigns: Dict[str, Dict[str, SourceAssignInfo]] = defaultdict(dict)
-        for module_name, definitions in self.design_catalog["modules_by_name"].items():
-            if not definitions:
-                continue
-            module_def = definitions[0]
-            module_text = module_def.get("text", "")
-            stripped_text = self._strip_comments(module_text)
-            for match in SOURCE_ASSIGN_RE.finditer(stripped_text):
-                lhs_raw = module_text[match.start("lhs") : match.end("lhs")]
-                rhs_raw = module_text[match.start("rhs") : match.end("rhs")]
-                lhs = self._source_lhs_name(lhs_raw)
-                if not lhs:
-                    continue
-                assigns[module_name][lhs] = SourceAssignInfo(
-                    module_name=module_name,
-                    lhs=lhs,
-                    rhs=rhs_raw.strip(),
-                    deps=self._source_expr_refs(rhs_raw),
-                    const_value=self._parse_source_constant(rhs_raw),
-                    location=self._source_location_for_match(module_def, match.start()),
-                )
-        return {module: dict(items) for module, items in assigns.items()}
-
-    @staticmethod
-    def _extract_port_name_from_decl(token: str) -> Optional[str]:
-        token = token.strip()
-        if not token:
-            return None
-        token = re.sub(r"\b(input|output|inout|wire|logic|reg|signed|unsigned|var|tri|supply0|supply1)\b", " ", token)
-        token = re.sub(r"\[[^\]]+\]", " ", token)
-        token = token.split("=")[0].strip()
-        match = PORT_DECL_NAME_RE.search(token)
-        if not match:
-            return None
-        return match.group(1)
-
-    @staticmethod
-    def _simple_signal_name(expr: str) -> Optional[str]:
-        token = expr.strip()
-        if not token or token.startswith("."):
-            return None
-        if token in {"1'b0", "1'b1", "1'h0", "1'h1", "1'd0", "1'd1"}:
-            return None
-        if any(ch in token for ch in "{}()"):
-            return None
-        if "[" in token:
-            return None
-        return token
-
-    @staticmethod
-    def _simple_connection_expr(expr: str) -> Optional[str]:
-        token = expr.strip()
-        match = SIMPLE_CONNECTION_EXPR_RE.fullmatch(token)
-        if not match:
-            return None
-        return token
-
-    @staticmethod
-    def _unwrap_outer_parens(expr: str) -> str:
-        token = expr.strip()
-        while token.startswith("(") and token.endswith(")"):
-            depth = 0
-            balanced = True
-            for index, char in enumerate(token):
-                if char == "(":
-                    depth += 1
-                elif char == ")":
-                    depth -= 1
-                    if depth == 0 and index != len(token) - 1:
-                        balanced = False
-                        break
-            if not balanced or depth != 0:
-                break
-            token = token[1:-1].strip()
-        return token
-
-    @staticmethod
-    def _parse_signal_reference(expr: str) -> Optional[Tuple[str, Optional[int], Optional[int]]]:
-        match = SIMPLE_SIGNAL_REF_RE.fullmatch(expr.strip())
-        if not match:
-            return None
-        base = match.group(1)
-        index_hi = int(match.group(2)) if match.group(2) is not None else None
-        index_lo = int(match.group(3)) if match.group(3) is not None else None
-        return base, index_hi, index_lo
-
-    @staticmethod
-    def _top_level_operator_index(expr: str, operator: str) -> int:
-        depth_paren = 0
-        depth_brace = 0
-        depth_bracket = 0
-        for index, char in enumerate(expr):
-            if char == "(":
-                depth_paren += 1
-            elif char == ")":
-                depth_paren = max(0, depth_paren - 1)
-            elif char == "{":
-                depth_brace += 1
-            elif char == "}":
-                depth_brace = max(0, depth_brace - 1)
-            elif char == "[":
-                depth_bracket += 1
-            elif char == "]":
-                depth_bracket = max(0, depth_bracket - 1)
-            elif (
-                char == operator
-                and depth_paren == 0
-                and depth_brace == 0
-                and depth_bracket == 0
-                ):
-                    return index
-        return -1
-
-    def _find_top_level_binary_operator(self, expr: str, operator: str) -> int:
-        depth_paren = 0
-        depth_brace = 0
-        depth_bracket = 0
-        op_len = len(operator)
-
-        for index in range(len(expr) - op_len, -1, -1):
-            char = expr[index]
-            if char == ")":
-                depth_paren += 1
-                continue
-            if char == "(":
-                depth_paren = max(0, depth_paren - 1)
-                continue
-            if char == "}":
-                depth_brace += 1
-                continue
-            if char == "{":
-                depth_brace = max(0, depth_brace - 1)
-                continue
-            if char == "]":
-                depth_bracket += 1
-                continue
-            if char == "[":
-                depth_bracket = max(0, depth_bracket - 1)
-                continue
-            if depth_paren != 0 or depth_brace != 0 or depth_bracket != 0:
-                continue
-            if not expr.startswith(operator, index):
-                continue
-
-            if operator in {"+", "-"}:
-                prev_index = index - 1
-                while prev_index >= 0 and expr[prev_index].isspace():
-                    prev_index -= 1
-                if prev_index < 0 or expr[prev_index] in "([{?:,=<>!&|^~+-*/%":
-                    continue
-
-            return index
-        return -1
-
-    def _split_top_level_binary(self, expr: str) -> Optional[Tuple[str, str, str]]:
-        expr = self._unwrap_outer_parens(expr)
-        for operator in BINARY_EXPR_OPERATORS:
-            index = self._find_top_level_binary_operator(expr, operator)
-            if index < 0:
-                continue
-            lhs = expr[:index].strip()
-            rhs = expr[index + len(operator) :].strip()
-            if not lhs or not rhs:
-                continue
-            return lhs, operator, rhs
-        return None
-
-    def _split_top_level_ternary(self, expr: str) -> Optional[Tuple[str, str, str]]:
-        expr = self._unwrap_outer_parens(expr)
-        q_index = self._top_level_operator_index(expr, "?")
-        if q_index < 0:
-            return None
-
-        depth_paren = 0
-        depth_brace = 0
-        depth_bracket = 0
-        nested_q = 0
-        colon_index = -1
-        for index in range(q_index + 1, len(expr)):
-            char = expr[index]
-            if char == "(":
-                depth_paren += 1
-            elif char == ")":
-                depth_paren = max(0, depth_paren - 1)
-            elif char == "{":
-                depth_brace += 1
-            elif char == "}":
-                depth_brace = max(0, depth_brace - 1)
-            elif char == "[":
-                depth_bracket += 1
-            elif char == "]":
-                depth_bracket = max(0, depth_bracket - 1)
-            elif (
-                depth_paren == 0
-                and depth_brace == 0
-                and depth_bracket == 0
-            ):
-                if char == "?":
-                    nested_q += 1
-                elif char == ":":
-                    if nested_q == 0:
-                        colon_index = index
-                        break
-                    nested_q -= 1
-
-        if colon_index < 0:
-            return None
-        return (
-            expr[:q_index].strip(),
-            expr[q_index + 1 : colon_index].strip(),
-            expr[colon_index + 1 :].strip(),
-        )
-
-    @staticmethod
-    def _strip_bit_suffix(signal_name: str) -> str:
-        return re.sub(r"\[\d+\]$", "", signal_name.strip())
-
-    def _target_bit_from_local_signal(self, local_signal: str) -> Optional[int]:
-        parsed = self._parse_signal_reference(local_signal)
-        if parsed is None:
-            return None
-        _, index_hi, index_lo = parsed
-        if index_hi is not None and index_lo is None:
-            return index_hi
-        return None
-
-    def _signal_ref_bits(self, ctx: InstanceContext, signal_expr: str) -> Optional[List[Bit]]:
-        parsed = self._parse_signal_reference(signal_expr)
-        if parsed is None:
-            return None
-        base_signal, index_hi, index_lo = parsed
-        module_index = self.module_indices.get(ctx.module_name)
-        if module_index is None:
-            return None
-        bits = module_index.name_to_bits.get(base_signal, [])
-        if not bits:
-            return None
-        if index_hi is None:
-            return list(bits)
-        if index_lo is None:
-            if 0 <= index_hi < len(bits):
-                return [bits[index_hi]]
-            return None
-        lo = min(index_hi, index_lo)
-        hi = max(index_hi, index_lo)
-        if hi >= len(bits):
-            return None
-        return list(bits[lo : hi + 1])
-
-    def _expr_width(self, ctx: InstanceContext, expr: str) -> Optional[int]:
-        expr = self._unwrap_outer_parens(expr)
-        sig_bits = self._signal_ref_bits(ctx, expr)
-        if sig_bits is not None:
-            return len(sig_bits)
-
-        literal_match = re.fullmatch(r"(\d+)'[bBdDhHoO][0-9a-fA-F_xXzZ]+", expr)
-        if literal_match:
-            return int(literal_match.group(1))
-        if expr in {"1'b0", "1'b1", "1'h0", "1'h1", "1'd0", "1'd1", "0", "1"}:
-            return 1
-
-        ternary = self._split_top_level_ternary(expr)
-        if ternary is not None:
-            _, true_expr, false_expr = ternary
-            true_width = self._expr_width(ctx, true_expr)
-            false_width = self._expr_width(ctx, false_expr)
-            if true_width is not None and true_width == false_width:
-                return true_width
-            return true_width or false_width
-
-        if expr.startswith("{") and expr.endswith("}"):
-            inner = expr[1:-1].strip()
-            rep_match = re.fullmatch(r"(\d+)\s*\{(.*)\}", inner, re.DOTALL)
-            if rep_match:
-                repeat = int(rep_match.group(1))
-                inner_width = self._expr_width(ctx, rep_match.group(2).strip())
-                return repeat * inner_width if inner_width is not None else None
-            parts = self._split_top_level_args(inner)
-            total = 0
-            for part in parts:
-                width = self._expr_width(ctx, part)
-                if width is None:
-                    return None
-                total += width
-            return total
-
-        return None
-
-    def _expr_signal_candidates(
-        self,
-        ctx: InstanceContext,
-        expr: str,
-        target_bit: Optional[int],
-    ) -> List[str]:
-        expr = self._unwrap_outer_parens(expr)
-        candidates: List[str] = []
-        seen: Set[str] = set()
-
-        def add(candidate: str) -> None:
-            candidate = self._unwrap_outer_parens(candidate)
-            if not candidate or candidate in seen:
-                return
-            seen.add(candidate)
-            candidates.append(candidate)
-
-        if self._parse_signal_reference(expr) is not None:
-            add(expr)
-            return candidates
-
-        ternary = self._split_top_level_ternary(expr)
-        if ternary is not None:
-            cond_expr, true_expr, false_expr = ternary
-            for candidate in self._expr_signal_candidates(ctx, cond_expr, None):
-                add(candidate)
-            for candidate in self._expr_signal_candidates(ctx, true_expr, target_bit):
-                add(candidate)
-            for candidate in self._expr_signal_candidates(ctx, false_expr, target_bit):
-                add(candidate)
-            return candidates
-
-        if expr.startswith("{") and expr.endswith("}"):
-            inner = expr[1:-1].strip()
-            rep_match = re.fullmatch(r"(\d+)\s*\{(.*)\}", inner, re.DOTALL)
-            if rep_match:
-                inner_expr = rep_match.group(2).strip()
-                inner_width = self._expr_width(ctx, inner_expr)
-                mapped_target = target_bit
-                if inner_width not in {None, 0} and target_bit is not None:
-                    mapped_target = target_bit % inner_width
-                for candidate in self._expr_signal_candidates(ctx, inner_expr, mapped_target):
-                    add(candidate)
-                return candidates
-
-            parts = self._split_top_level_args(inner)
-            if target_bit is not None:
-                cursor = 0
-                for part in reversed(parts):
-                    width = self._expr_width(ctx, part)
-                    if width is None:
-                        continue
-                    if cursor <= target_bit < cursor + width:
-                        inner_target = target_bit - cursor
-                        for candidate in self._expr_signal_candidates(ctx, part, inner_target):
-                            add(candidate)
-                        break
-                    cursor += width
-            for part in parts:
-                for candidate in self._expr_signal_candidates(ctx, part, None):
-                    add(candidate)
-            return candidates
-
-        func_match = FUNCTION_CALL_RE.fullmatch(expr)
-        if func_match is not None:
-            arg_blob = func_match.group(2).strip()
-            for arg in self._split_top_level_args(arg_blob):
-                for candidate in self._expr_signal_candidates(ctx, arg, target_bit):
-                    add(candidate)
-            return candidates
-
-        for prefix in UNARY_EXPR_PREFIXES:
-            if expr.startswith(prefix):
-                inner_expr = expr[len(prefix) :].strip()
-                if inner_expr:
-                    for candidate in self._expr_signal_candidates(ctx, inner_expr, target_bit):
-                        add(candidate)
-                    return candidates
-
-        binary = self._split_top_level_binary(expr)
-        if binary is not None:
-            lhs, _, rhs = binary
-            for candidate in self._expr_signal_candidates(ctx, lhs, target_bit):
-                add(candidate)
-            for candidate in self._expr_signal_candidates(ctx, rhs, target_bit):
-                add(candidate)
-            return candidates
-
-        for match in re.finditer(r"[A-Za-z_][A-Za-z0-9_$]*(?:\[\d+(?::\d+)?\])?", expr):
-            add(match.group(0))
-        return candidates
-
-    def _parse_named_port_map(self, port_blob: str) -> Dict[str, str]:
-        named_ports: Dict[str, str] = {}
-        for token in self._split_top_level_args(port_blob):
-            match = NAMED_PORT_ARG_RE.match(token.strip())
-            if not match:
-                continue
-            named_ports[match.group(1)] = match.group(2).strip()
-        return named_ports
-
-    def _build_source_primitive_cells(self) -> Dict[str, List[SourcePrimitiveCell]]:
-        cells_by_module: Dict[str, List[SourcePrimitiveCell]] = defaultdict(list)
-        modules_by_name = self.design_catalog.get("modules_by_name", {})
-        file_texts = self.design_catalog.get("file_texts", {})
-
-        for module_name, entries in modules_by_name.items():
-            if not entries:
-                continue
-            module_info = entries[0]
-            module_text = module_info.get("text", "")
-            stripped_text = self._strip_comments(module_text)
-            file_path = module_info.get("file", "")
-            file_text = file_texts.get(Path(file_path), "")
-            block_offset = file_text.find(module_text) if file_text else -1
-
-            for match in SOURCE_INSTANCE_STMT_RE.finditer(stripped_text):
-                callee = match.group(1)
-                if callee not in VERILOG_PRIMITIVES or callee not in SUPPORTED_SOURCE_PRIMITIVES:
-                    continue
-
-                instance_name = match.group(2)
-                port_args = self._split_top_level_args(match.group(3))
-                if not port_args:
-                    continue
-
-                output_signal = self._simple_signal_name(port_args[0])
-                if output_signal is None:
-                    continue
-
-                input_signals = [
-                    signal_name
-                    for signal_name in (
-                        self._simple_signal_name(arg) for arg in port_args[1:]
-                    )
-                    if signal_name is not None
-                ]
-
-                src = file_path
-                if file_text and block_offset >= 0:
-                    instance_offset = file_text.find(instance_name, block_offset)
-                    absolute_offset = instance_offset if instance_offset >= 0 else block_offset + match.start()
-                    line_no = file_text[:absolute_offset].count("\n") + 1
-                    src = f"{file_path}:{line_no}"
-
-                cells_by_module[module_name].append(
-                    SourcePrimitiveCell(
-                        module_name=module_name,
-                        instance_name=instance_name,
-                        primitive_type=callee,
-                        output_signal=output_signal,
-                        input_signals=input_signals,
-                        src=src,
-                    )
-                )
-
-        return cells_by_module
-
-    def _build_source_module_ports(self) -> Dict[str, List[str]]:
-        module_ports: Dict[str, List[str]] = {}
-        modules_by_name = self.design_catalog.get("modules_by_name", {})
-
-        for module_name, entries in modules_by_name.items():
-            if not entries:
-                continue
-            module_text = entries[0].get("text", "")
-            stripped_text = self._strip_comments(module_text)
-            header_match = re.search(
-                rf"module\s+{re.escape(module_name)}\b(?:\s*#\s*\((.*?)\))?\s*\((.*?)\)\s*;",
-                stripped_text,
-                re.DOTALL,
-            )
-            if not header_match:
-                continue
-
-            port_blob = header_match.group(2).strip()
-            if not port_blob:
-                module_ports[module_name] = []
-                continue
-
-            port_names: List[str] = []
-            for token in self._split_top_level_args(port_blob):
-                port_name = self._extract_port_name_from_decl(token)
-                if port_name:
-                    port_names.append(port_name)
-            module_ports[module_name] = port_names
-
-        return module_ports
-
-    def _build_source_instance_connections(self) -> Dict[str, Dict[str, Dict[str, str]]]:
-        connections_by_module: Dict[str, Dict[str, Dict[str, str]]] = defaultdict(dict)
-        modules_by_name = self.design_catalog.get("modules_by_name", {})
-
-        for module_name, entries in modules_by_name.items():
-            if not entries:
-                continue
-            module_text = entries[0].get("text", "")
-            stripped_text = self._strip_comments(module_text)
-            for match in SOURCE_INSTANCE_STMT_RE.finditer(stripped_text):
-                callee = match.group(1)
-                instance_name = match.group(2)
-                if callee in VERILOG_PRIMITIVES:
-                    continue
-                port_blob = match.group(3)
-                named_ports = self._parse_named_port_map(port_blob)
-                if named_ports:
-                    connections_by_module[module_name][instance_name] = named_ports
-                    continue
-
-                positional_args = self._split_top_level_args(port_blob)
-                port_order = self.source_module_ports.get(callee, [])
-                if not positional_args or not port_order:
-                    continue
-
-                mapped_ports = {
-                    port_name: expr.strip()
-                    for port_name, expr in zip(port_order, positional_args)
-                    if expr.strip()
-                }
-                if mapped_ports:
-                    connections_by_module[module_name][instance_name] = mapped_ports
-
-        return connections_by_module
 
     @staticmethod
     def _rtlil_unescape_id(token: str) -> str:
@@ -969,11 +250,11 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 return original_path + normalized[len(prepared_path):]
         return src
 
-    def _parse_rtlil_modules(self, rtlil_text: str) -> Dict[str, RtlilModuleInfo]:
-        modules: Dict[str, RtlilModuleInfo] = {}
-        current_module: Optional[RtlilModuleInfo] = None
-        current_cell: Optional[RtlilCellInfo] = None
-        pending_attrs: Dict[str, str] = {}
+    def _parse_rtlil_module_connects(
+        self, rtlil_text: str
+    ) -> Dict[str, List[Tuple[List[str], List[str]]]]:
+        connects: Dict[str, List[Tuple[List[str], List[str]]]] = defaultdict(list)
+        current_module: Optional[str] = None
         block_stack: List[str] = []
 
         for raw_line in rtlil_text.splitlines():
@@ -983,121 +264,99 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
 
             if stripped == "end":
                 ended_block = block_stack.pop() if block_stack else ""
-                if ended_block == "cell":
-                    current_cell = None
-                elif ended_block == "module":
+                if ended_block == "module":
                     current_module = None
-                pending_attrs = {}
-                continue
-
-            if stripped.startswith("attribute "):
-                top_block = block_stack[-1] if block_stack else ""
-                if top_block not in {"", "module"}:
-                    continue
-                parts = stripped.split(None, 2)
-                if len(parts) >= 3:
-                    value = parts[2].strip().strip('"')
-                    pending_attrs[self._rtlil_unescape_id(parts[1])] = (
-                        self._restore_original_src(value) if self._rtlil_unescape_id(parts[1]) == "src" else value
-                    )
                 continue
 
             if stripped.startswith("module "):
-                module_name = self._rtlil_unescape_id(stripped.split(None, 1)[1])
-                current_module = RtlilModuleInfo(name=module_name)
-                modules[module_name] = current_module
+                current_module = self._rtlil_unescape_id(stripped.split(None, 1)[1])
                 block_stack.append("module")
-                pending_attrs = {}
                 continue
 
             if current_module is None:
-                pending_attrs = {}
                 continue
 
             top_block = block_stack[-1] if block_stack else ""
-
-            if top_block == "module" and stripped.startswith("wire "):
-                parts = stripped.split()
-                wire_name = self._rtlil_unescape_id(parts[-1])
-                if "input" in parts:
-                    current_module.inputs.add(wire_name)
-                if "output" in parts:
-                    current_module.outputs.add(wire_name)
-                pending_attrs = {}
-                continue
-
-            if top_block == "module" and stripped.startswith("cell "):
-                _, cell_type, cell_name = stripped.split(None, 2)
-                current_cell = RtlilCellInfo(
-                    name=self._rtlil_unescape_id(cell_name),
-                    cell_type=self._rtlil_unescape_id(cell_type),
-                    src=pending_attrs.get("src", ""),
+            if top_block == "module" and stripped.startswith("connect "):
+                lhs, rhs = self._split_rtlil_connect_operands(stripped[len("connect "):])
+                connects[current_module].append(
+                    (self._rtlil_parse_sigspec(lhs), self._rtlil_parse_sigspec(rhs))
                 )
-                current_module.cells[current_cell.name] = current_cell
-                block_stack.append("cell")
-                pending_attrs = {}
                 continue
 
             if top_block == "module" and stripped.startswith("process "):
                 block_stack.append("process")
-                pending_attrs = {}
                 continue
 
             if top_block in {"module", "process", "switch"} and stripped.startswith("switch "):
                 block_stack.append("switch")
-                pending_attrs = {}
-                continue
-
-            if top_block in {"process", "switch"} and stripped.startswith("case "):
-                pending_attrs = {}
-                continue
-
-            if top_block in {"module", "process", "switch"} and stripped.startswith("sync "):
-                pending_attrs = {}
                 continue
 
             if top_block == "module" and stripped.startswith("memory "):
                 block_stack.append("memory")
-                pending_attrs = {}
                 continue
 
-            if top_block == "module" and stripped.startswith("connect "):
-                lhs, rhs = self._split_rtlil_connect_operands(stripped[len("connect "):])
-                current_module.connects.append(
-                    (self._rtlil_parse_sigspec(lhs), self._rtlil_parse_sigspec(rhs))
+            if top_block == "module" and stripped.startswith("cell "):
+                block_stack.append("cell")
+                continue
+
+        return {module: list(items) for module, items in connects.items()}
+
+    def _build_yosys_modules(
+        self, netlist_data: Dict, rtlil_text: str
+    ) -> Dict[str, YosysModuleInfo]:
+        rtlil_connects = self._parse_rtlil_module_connects(rtlil_text)
+        modules: Dict[str, YosysModuleInfo] = {}
+
+        for module_name, module_data in netlist_data.get("modules", {}).items():
+            module_info = YosysModuleInfo(
+                name=module_name,
+                connects=rtlil_connects.get(module_name, []),
+            )
+            for port_name, port_data in module_data.get("ports", {}).items():
+                direction = port_data.get("direction", "")
+                bits = list(port_data.get("bits", []))
+                module_info.name_to_bits[port_name] = bits
+                if direction in {"input", "inout"}:
+                    module_info.inputs.add(port_name)
+                if direction in {"output", "inout"}:
+                    module_info.outputs.add(port_name)
+                for bit in bits:
+                    module_info.bit_to_names[bit].append(port_name)
+
+            for net_name, net_data in module_data.get("netnames", {}).items():
+                bits = list(net_data.get("bits", []))
+                if not bits:
+                    continue
+                module_info.name_to_bits[net_name] = bits
+                for bit in bits:
+                    module_info.bit_to_names[bit].append(net_name)
+
+            for cell_name, cell_data in module_data.get("cells", {}).items():
+                attributes = cell_data.get("attributes", {})
+                module_info.cells[cell_name] = YosysCellInfo(
+                    name=cell_name,
+                    cell_type=cell_data.get("type", ""),
+                    src=self._restore_original_src(attributes.get("src", "")),
+                    connections={
+                        port: list(bits)
+                        for port, bits in cell_data.get("connections", {}).items()
+                    },
+                    port_directions=dict(cell_data.get("port_directions", {})),
                 )
-                pending_attrs = {}
-                continue
-
-            if top_block == "cell" and stripped.startswith("connect "):
-                port_name, sigspec = self._split_rtlil_connect_operands(stripped[len("connect "):])
-                current_cell.connections[self._rtlil_unescape_id(port_name)] = self._rtlil_parse_sigspec(
-                    sigspec
-                )
-                continue
-
-            if top_block in {"process", "switch"} and (
-                stripped.startswith("assign ") or stripped.startswith("update ") or stripped.startswith("case ")
-            ):
-                continue
-
-            if top_block == "cell" and stripped.startswith("parameter "):
-                continue
-
-            pending_attrs = {}
-
+            modules[module_name] = module_info
         return modules
 
-    def _build_rtlil_context_tree(
-        self, rtlil_modules: Dict[str, RtlilModuleInfo]
+    def _build_yosys_context_tree(
+        self, modules: Dict[str, YosysModuleInfo]
     ) -> Tuple[Optional[InstanceContext], List[InstanceContext], Dict[str, InstanceContext]]:
         def build(module_name: str, path: Tuple[str, ...]) -> InstanceContext:
             ctx = InstanceContext(module_name=module_name, path=path)
-            module_info = rtlil_modules.get(module_name)
+            module_info = modules.get(module_name)
             if module_info is None:
                 return ctx
             for cell_name, cell in sorted(module_info.cells.items()):
-                if cell.cell_type in rtlil_modules:
+                if cell.cell_type in modules:
                     ctx.children[cell_name] = build(cell.cell_type, path + (cell_name,))
             return ctx
 
@@ -1139,7 +398,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
         return f"{len(bit_string)}'b{bit_string}"
 
     def _rtlil_direct_driver_tokens(
-        self, module_info: RtlilModuleInfo, local_name: str
+        self, module_info: YosysModuleInfo, local_name: str
     ) -> Optional[List[str]]:
         for lhs_tokens, rhs_tokens in module_info.connects:
             if lhs_tokens == [local_name]:
@@ -1147,7 +406,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
         return None
 
     def _rtlil_direct_driver(
-        self, module_info: RtlilModuleInfo, local_name: str
+        self, module_info: YosysModuleInfo, local_name: str
     ) -> Optional[str]:
         tokens = self._rtlil_direct_driver_tokens(module_info, local_name)
         if tokens is None:
@@ -1155,7 +414,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
         return " ".join(tokens)
 
     def _rtlil_direct_constant(
-        self, module_info: RtlilModuleInfo, local_name: str
+        self, module_info: YosysModuleInfo, local_name: str
     ) -> Optional[str]:
         tokens = self._rtlil_direct_driver_tokens(module_info, local_name)
         if tokens is None:
@@ -1163,7 +422,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
         return self._rtlil_constant_value_from_tokens(tokens)
 
     def _rtlil_constant_through_driver(
-        self, module_info: RtlilModuleInfo, local_name: str
+        self, module_info: YosysModuleInfo, local_name: str
     ) -> Tuple[str, str]:
         driver_tokens = self._rtlil_direct_driver_tokens(module_info, local_name)
         if not driver_tokens or len(driver_tokens) != 1:
@@ -1176,94 +435,71 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
         folded_value = self._rtlil_direct_constant(module_info, driver) or ""
         return driver, folded_value
 
-    def _rtlil_alias_graph(self, module_info: RtlilModuleInfo) -> Dict[str, Set[str]]:
-        graph: Dict[str, Set[str]] = defaultdict(set)
-        for lhs_tokens, rhs_tokens in module_info.connects:
-            if len(lhs_tokens) != 1 or len(rhs_tokens) != 1:
-                continue
-            lhs = lhs_tokens[0]
-            rhs = rhs_tokens[0]
-            if lhs in {"0", "1"} or rhs in {"0", "1"}:
-                continue
-            if re.fullmatch(r"[0-9]+'[01xz]+", lhs) or re.fullmatch(r"[0-9]+'[01xz]+", rhs):
-                continue
-            graph[lhs].add(rhs)
-            graph[rhs].add(lhs)
-        return graph
+    @staticmethod
+    def _is_json_const_bit(bit: Bit) -> bool:
+        return isinstance(bit, str) and bit.lower() in {"0", "1", "x", "z"}
 
-    def _resolve_rtlil_output_signals(
-        self, module_info: RtlilModuleInfo, cell: RtlilCellInfo
+    def _preferred_json_names_for_bits(
+        self, module_info: YosysModuleInfo, bits: List[Bit]
     ) -> List[str]:
-        output_port_names = {"Y", "Q", "QB", "O", "S"}
-        alias_graph = self._rtlil_alias_graph(module_info)
+        if not bits or any(self._is_json_const_bit(bit) for bit in bits):
+            return []
+
+        exact_names = [
+            name
+            for name, name_bits in module_info.name_to_bits.items()
+            if list(name_bits) == list(bits)
+        ]
+        if not exact_names and len(bits) == 1:
+            exact_names = list(module_info.bit_to_names.get(bits[0], []))
+
+        public_names = [name for name in exact_names if not name.startswith("$")]
+        selected = public_names or exact_names
+        return sorted(set(selected), key=lambda name: (name.startswith("$"), "[" in name, len(name), name))
+
+    def _resolve_yosys_output_signals(
+        self, module_info: YosysModuleInfo, cell: YosysCellInfo
+    ) -> List[str]:
+        fallback_output_ports = {"Y", "Q", "QB", "O", "S"}
         resolved: List[str] = []
         seen: Set[str] = set()
 
-        for port_name, tokens in cell.connections.items():
-            if port_name not in output_port_names:
+        for port_name, bits in cell.connections.items():
+            direction = cell.port_directions.get(port_name)
+            if direction != "output" and (
+                direction is not None or port_name not in fallback_output_ports
+            ):
                 continue
-            for token in tokens:
-                queue = [token]
-                visited = {token}
-                best_names: List[str] = []
-                while queue:
-                    current = queue.pop(0)
-                    if not current.startswith("$"):
-                        best_names.append(current)
-                    for neighbor in sorted(alias_graph.get(current, set())):
-                        if neighbor in visited:
-                            continue
-                        visited.add(neighbor)
-                        queue.append(neighbor)
-                chosen = best_names or [token]
-                for name in chosen:
-                    if name not in seen:
-                        seen.add(name)
-                        resolved.append(name)
+            for name in self._preferred_json_names_for_bits(module_info, list(bits)):
+                if name not in seen:
+                    seen.add(name)
+                    resolved.append(name)
         return resolved
 
-    def _resolve_rtlil_input_signals(
-        self, module_info: RtlilModuleInfo, cell: RtlilCellInfo
+    def _resolve_yosys_input_signals(
+        self, module_info: YosysModuleInfo, cell: YosysCellInfo
     ) -> List[str]:
-        output_port_names = {"Y", "Q", "QB", "O", "S"}
-        alias_graph = self._rtlil_alias_graph(module_info)
+        fallback_output_ports = {"Y", "Q", "QB", "O", "S"}
         resolved: List[str] = []
         seen: Set[str] = set()
 
-        for port_name, tokens in cell.connections.items():
-            if port_name in output_port_names:
+        for port_name, bits in cell.connections.items():
+            direction = cell.port_directions.get(port_name)
+            if direction == "output" or (
+                direction is None and port_name in fallback_output_ports
+            ):
                 continue
-            for token in tokens:
-                if token in {"0", "1"} or re.fullmatch(r"[0-9]+'[01xz]+", token):
-                    continue
-                queue = [token]
-                visited = {token}
-                chosen: Optional[str] = None
-                while queue:
-                    current = queue.pop(0)
-                    if not current.startswith("$"):
-                        chosen = current
-                        break
-                    for neighbor in sorted(alias_graph.get(current, set())):
-                        if neighbor in visited:
-                            continue
-                        visited.add(neighbor)
-                        queue.append(neighbor)
-                final_name = chosen or token
-                if final_name not in seen:
-                    seen.add(final_name)
-                    resolved.append(final_name)
+            for name in self._preferred_json_names_for_bits(module_info, list(bits)):
+                if name not in seen:
+                    seen.add(name)
+                    resolved.append(name)
         return resolved
 
     def _cell_source(self, cell_data: Dict) -> str:
         return self._restore_original_src(cell_data.get("attributes", {}).get("src", ""))
 
-    @staticmethod
-    def _rtlil_cell_to_source_primitive(cell_type: str) -> str:
-        return RTLIL_TO_SOURCE_PRIMITIVE.get(cell_type, cell_type)
-
     def _canonical_comb_type(self, cell_type: str) -> str:
-        return self._normalize_cell_type(self._rtlil_cell_to_source_primitive(cell_type))
+        return self._normalize_cell_type(cell_type)
 
     def _normalize_src_key(self, src: str) -> str:
         src = self._restore_original_src(src)
@@ -1272,43 +508,14 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             return f"{match.group(1)}:{match.group(2)}"
         return src
 
-    def _match_source_primitive(
-        self,
-        module_name: str,
-        cell_type: str,
-        src: str,
-        output_signals: List[str],
-    ) -> Optional[SourcePrimitiveCell]:
-        canonical_type = self._canonical_comb_type(cell_type)
-        src_key = self._normalize_src_key(src)
-        output_set = set(output_signals)
-
-        candidates = [
-            primitive
-            for primitive in self.source_primitive_cells.get(module_name, [])
-            if primitive.primitive_type == canonical_type
-            and self._normalize_src_key(primitive.src) == src_key
-        ]
-        if not candidates:
-            return None
-
-        if output_set:
-            exact = [primitive for primitive in candidates if primitive.output_signal in output_set]
-            if len(exact) == 1:
-                return exact[0]
-            if exact:
-                candidates = exact
-
-        return candidates[0]
-
-    def _rtlil_local_cell_match_key(
-        self, module_info: RtlilModuleInfo, cell: RtlilCellInfo
+    def _yosys_local_cell_match_key(
+        self, module_info: YosysModuleInfo, cell: YosysCellInfo
     ) -> Tuple[str, str, Tuple[str, ...], Tuple[str, ...]]:
         return (
             self._canonical_comb_type(cell.cell_type),
             self._normalize_src_key(cell.src),
-            tuple(sorted(self._resolve_rtlil_output_signals(module_info, cell))),
-            tuple(sorted(self._resolve_rtlil_input_signals(module_info, cell))),
+            tuple(sorted(self._resolve_yosys_output_signals(module_info, cell))),
+            tuple(sorted(self._resolve_yosys_input_signals(module_info, cell))),
         )
 
     def _node_key_for_ctx(self, ctx: InstanceContext, bit: Bit) -> Tuple[str, Bit]:
@@ -1384,72 +591,23 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                             self._node_key_for_ctx(ctx, output_bit),
                         )
 
-            for primitive in self.source_primitive_cells.get(ctx.module_name, []):
-                output_bits = module_index.name_to_bits.get(primitive.output_signal, [])
-                if not output_bits:
-                    continue
-                for input_signal in primitive.input_signals:
-                    input_bits = module_index.name_to_bits.get(input_signal, [])
-                    for input_bit in input_bits:
-                        for output_bit in output_bits:
-                            self._add_edge(
-                                self._node_key_for_ctx(ctx, input_bit),
-                            self._node_key_for_ctx(ctx, output_bit),
-                        )
-
-    def _source_direct_roots_for_signal(
-        self,
-        ctx: InstanceContext,
-        local_signal: str,
-    ) -> List[SourceDirectRoot]:
-        assigns = self.source_assigns.get(ctx.module_name, {})
-        found: Dict[str, SourceDirectRoot] = {}
-        visited: Set[str] = set()
-
-        def visit(signal_name: str) -> None:
-            signal_name = self._normalize_source_signal_token(signal_name)
-            if not signal_name or signal_name in visited:
-                return
-            visited.add(signal_name)
-
-            info = assigns.get(signal_name)
-            if info is None:
-                return
-            if info.const_value:
-                hier_signal = f"{ctx.path_str}.{signal_name}"
-                found[hier_signal] = SourceDirectRoot(
-                    signal=hier_signal,
-                    value=info.const_value,
-                    location=info.location,
-                    expression=f"assign {info.lhs} = {info.rhs};",
-                )
-                return
-
-            for dep in info.deps:
-                visit(dep)
-
-        visit(local_signal)
-        return [found[key] for key in sorted(found)]
-
     def _record_to_affected(self, record: SignalConstRecord) -> AffectedSignal:
         paths: List[PropagationPath] = []
-        promoted_roots: List[str] = []
+        root_ids: List[str] = []
         seen_roots: Set[str] = set()
         ctx = self.raw_context_map.get(record.module)
-        source_direct_roots: List[SourceDirectRoot] = []
         bits: List[Bit] = []
         if ctx is not None:
             module_index = self.module_indices[ctx.module_name]
             leaf = record.hierarchical_signal.split(".")[-1]
             bits = module_index.name_to_bits.get(leaf, [])
-            source_direct_roots = self._source_direct_roots_for_signal(ctx, leaf)
 
         for raw_root_id in record.root_ids:
-            root_id = self._promote_root_id(raw_root_id)
+            root_id = raw_root_id
             if root_id in seen_roots:
                 continue
             seen_roots.add(root_id)
-            promoted_roots.append(root_id)
+            root_ids.append(root_id)
             root = self.root_causes.get(root_id)
             if root is None:
                 continue
@@ -1468,11 +626,43 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             value=record.constant_value,
             kind=record.signal_kind,
             aliases=record.aliases,
-            roots=promoted_roots,
+            roots=root_ids,
             reason=record.reason,
             propagation_paths=paths,
-            source_direct_roots=source_direct_roots,
         )
+
+    def _merge_signal_evidence(
+        self,
+        ctx: InstanceContext,
+        local_name: str,
+        bits: List[Bit],
+        value: str,
+        root_ids: Set[str],
+    ) -> Tuple[Set[str], List[str]]:
+        merged_roots = set(root_ids)
+        reason_parts: List[str] = []
+
+        noopt_evidence = self.noopt_const_map.get(self._noopt_key(ctx, local_name))
+        if noopt_evidence is not None:
+            noopt_value = self._format_const_value([noopt_evidence.value])
+            if noopt_value == value:
+                merged_roots |= set(noopt_evidence.root_ids)
+                noopt_reason = self.noopt_reason_map.get(self._noopt_key(ctx, local_name), "")
+                if noopt_reason:
+                    reason_parts.append(noopt_reason)
+
+        for bit in bits:
+            if bit in CONST_BITS:
+                continue
+            reason = self.reason_map.get(self._node_key(ctx, bit), "")
+            if reason and reason not in reason_parts:
+                reason_parts.append(reason)
+
+        literal_reason = self._json_literal_constant_reason(ctx, local_name, bits, value)
+        if literal_reason and literal_reason not in reason_parts:
+            reason_parts.append(literal_reason)
+
+        return merged_roots, reason_parts
 
     def _signal_record_for_bits(
         self,
@@ -1492,13 +682,14 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             return None
 
         value, root_ids = resolved
-        reason_parts: List[str] = []
-        for bit in bits:
-            if bit in CONST_BITS:
-                continue
-            reason = self.reason_map.get(self._node_key(ctx, bit), "")
-            if reason and reason not in reason_parts:
-                reason_parts.append(reason)
+        local_name = fallback_signal.split(".")[-1]
+        root_ids, reason_parts = self._merge_signal_evidence(
+            ctx,
+            local_name,
+            bits,
+            value,
+            root_ids,
+        )
 
         return SignalConstRecord(
             hierarchical_signal=fallback_signal,
@@ -1542,30 +733,6 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
 
         return affected
 
-    def _removed_local_cell_outputs(self, ctx: InstanceContext, cell_name: str, cell_data: Dict) -> List[AffectedSignal]:
-        directions = cell_data.get("port_directions", {})
-        connections = cell_data.get("connections", {})
-        affected: List[AffectedSignal] = []
-        seen_signals: Set[str] = set()
-
-        for port_name, direction in directions.items():
-            if direction != "output":
-                continue
-            bits = connections.get(port_name, [])
-            if not bits:
-                continue
-            aliases = self._signal_aliases_hier(ctx, bits)
-            fallback_signal = aliases[0] if aliases else f"{ctx.path_str}.{cell_name}.{port_name}"
-            record = self._signal_record_for_bits(ctx, bits, fallback_signal, "wire")
-            if record is None:
-                continue
-            if record.hierarchical_signal in seen_signals:
-                continue
-            seen_signals.add(record.hierarchical_signal)
-            affected.append(self._record_to_affected(record))
-
-        return affected
-
     def _signal_kind_for_local_name(self, ctx: InstanceContext, local_name: str) -> str:
         module_index = self.module_indices[ctx.module_name]
         direction = module_index.port_directions.get(local_name)
@@ -1585,13 +752,13 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             return None
 
         value, root_ids = resolved
-        reason_parts: List[str] = []
-        for bit in bits:
-            if bit in CONST_BITS:
-                continue
-            reason = self.reason_map.get(self._node_key(ctx, bit), "")
-            if reason and reason not in reason_parts:
-                reason_parts.append(reason)
+        root_ids, reason_parts = self._merge_signal_evidence(
+            ctx,
+            local_name,
+            bits,
+            value,
+            root_ids,
+        )
 
         return SignalConstRecord(
             hierarchical_signal=fallback_signal,
@@ -1603,54 +770,12 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             reason=" | ".join(reason_parts),
         )
 
-    def _estimate_local_source_path(
-        self, ctx: InstanceContext, root_signal: str, target_signal: str
-    ) -> List[str]:
-        root_parts = root_signal.split(".")
-        target_parts = target_signal.split(".")
-        if len(root_parts) < 2 or len(target_parts) < 2:
-            return []
-        if ".".join(root_parts[:-1]) != ctx.path_str or ".".join(target_parts[:-1]) != ctx.path_str:
-            return []
-
-        root_local = root_parts[-1]
-        target_local = target_parts[-1]
-        if root_local == target_local:
-            return [root_signal]
-
-        graph: Dict[str, Set[str]] = defaultdict(set)
-        for primitive in self.source_primitive_cells.get(ctx.module_name, []):
-            for input_signal in primitive.input_signals:
-                graph[input_signal].add(primitive.output_signal)
-
-        queue: List[List[str]] = [[root_local]]
-        visited: Set[str] = {root_local}
-        while queue:
-            path = queue.pop(0)
-            current = path[-1]
-            if current == target_local:
-                return [f"{ctx.path_str}.{name}" for name in path]
-            for neighbor in sorted(graph.get(current, set())):
-                if neighbor in visited:
-                    continue
-                visited.add(neighbor)
-                queue.append(path + [neighbor])
-        return []
-
-    def _removed_source_cell_outputs(
-        self, ctx: InstanceContext, primitive: SourcePrimitiveCell
-    ) -> List[AffectedSignal]:
-        record = self._record_for_named_signal(ctx, primitive.output_signal)
-        if record is None:
-            return []
-        return [self._record_to_affected(record)]
-
     def _removed_before_local_cell_outputs(
-        self, ctx: InstanceContext, module_info: RtlilModuleInfo, cell: RtlilCellInfo
+        self, ctx: InstanceContext, module_info: YosysModuleInfo, cell: YosysCellInfo
     ) -> List[AffectedSignal]:
         affected: List[AffectedSignal] = []
         seen: Set[str] = set()
-        for local_name in self._resolve_rtlil_output_signals(module_info, cell):
+        for local_name in self._resolve_yosys_output_signals(module_info, cell):
             if local_name in seen:
                 continue
             seen.add(local_name)
@@ -1685,181 +810,6 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 nodes.add(self._node_key_for_ctx(ctx, bit))
         return nodes
 
-    def _find_existing_named_root(self, hierarchical_signal: str, value: str) -> Optional[str]:
-        root = self.root_causes.get(hierarchical_signal)
-        if root and root.source_type != "literal_connection" and root.constant_value == value:
-            return root.root_id
-
-        for root_id, candidate in self.root_causes.items():
-            if candidate.source_type == "literal_connection":
-                continue
-            if candidate.constant_value != value:
-                continue
-            if candidate.hierarchical_signal == hierarchical_signal:
-                return root_id
-            if hierarchical_signal in candidate.aliases:
-                return root_id
-        return None
-
-    def _register_promoted_named_root(
-        self,
-        ctx: InstanceContext,
-        local_signal: str,
-        value: str,
-        source_type: str,
-        note: str,
-    ) -> str:
-        hierarchical_signal = f"{ctx.path_str}.{local_signal}"
-        existing = self._find_existing_named_root(hierarchical_signal, value)
-        if existing:
-            root = self.root_causes.get(existing)
-            if root is not None and note not in root.notes:
-                root.notes.append(note)
-            return existing
-
-        module_index = self.module_indices.get(ctx.module_name)
-        bits = module_index.name_to_bits.get(local_signal, []) if module_index is not None else []
-        aliases = self._signal_aliases_hier(ctx, bits) if bits else [hierarchical_signal]
-        self.root_causes[hierarchical_signal] = RootCause(
-            root_id=hierarchical_signal,
-            hierarchical_signal=hierarchical_signal,
-            local_signal=local_signal,
-            constant_value=value,
-            source_type=source_type,
-            location=f"信号: {hierarchical_signal}",
-            aliases=aliases,
-            notes=[note],
-        )
-        return hierarchical_signal
-
-    def _promote_signal_candidate(
-        self,
-        ctx: InstanceContext,
-        signal_expr: str,
-        expected_value: str,
-        visited: Set[Tuple[str, str, str]],
-    ) -> Optional[str]:
-        parsed = self._parse_signal_reference(signal_expr)
-        if parsed is None:
-            return None
-
-        base_signal, _, _ = parsed
-        selected_bits = self._signal_ref_bits(ctx, signal_expr)
-        if selected_bits:
-            selected_const = self._resolve_signal_constant(
-                ctx,
-                selected_bits,
-                f"{ctx.path_str}.{signal_expr}",
-            )
-            if selected_const is not None and selected_const[0] != expected_value:
-                return None
-
-        base_bits = self._signal_ref_bits(ctx, base_signal)
-        base_hier_signal = f"{ctx.path_str}.{base_signal}"
-        base_const = (
-            self._resolve_signal_constant(ctx, base_bits, base_hier_signal)
-            if base_bits
-            else None
-        )
-        if base_const is not None:
-            base_source_type = self._determine_source_type(
-                ctx.module_name,
-                base_hier_signal,
-                base_const[0],
-            )
-            if base_source_type in EXPLICIT_SOURCE_TYPES:
-                return self._register_promoted_named_root(
-                    ctx,
-                    base_signal,
-                    base_const[0],
-                    base_source_type,
-                    f"promoted from child literal connection {ctx.path_str}.{signal_expr}",
-                )
-
-        module_index = self.module_indices.get(ctx.module_name)
-        if module_index is None:
-            return None
-
-        direction = module_index.port_directions.get(base_signal)
-        if direction in {"input", "inout"}:
-            return self._promote_literal_root_through_parents(
-                ctx,
-                signal_expr,
-                expected_value,
-                visited,
-            )
-        return None
-
-    def _promote_literal_root_through_parents(
-        self,
-        ctx: InstanceContext,
-        local_signal: str,
-        value: str,
-        visited: Set[Tuple[str, str, str]],
-    ) -> Optional[str]:
-        visit_key = (ctx.path_str, local_signal, value)
-        if visit_key in visited:
-            return None
-        visited.add(visit_key)
-
-        parsed_local = self._parse_signal_reference(local_signal)
-        if parsed_local is not None:
-            promoted_here = self._promote_signal_candidate(ctx, local_signal, value, visited)
-            if promoted_here:
-                return promoted_here
-
-        if len(ctx.path) <= 1:
-            return None
-
-        parent_ctx = self.raw_context_map.get(".".join(ctx.path[:-1]))
-        if parent_ctx is None:
-            return None
-
-        port_name = self._strip_bit_suffix(local_signal)
-        instance_name = ctx.path[-1]
-        port_map = self.source_instance_connections.get(parent_ctx.module_name, {}).get(instance_name, {})
-        expr = port_map.get(port_name)
-        if not expr:
-            return None
-
-        target_bit = self._target_bit_from_local_signal(local_signal)
-        for candidate in self._expr_signal_candidates(parent_ctx, expr, target_bit):
-            promoted = self._promote_signal_candidate(parent_ctx, candidate, value, visited)
-            if promoted:
-                return promoted
-        return None
-
-    def _promote_root_id(self, root_id: str) -> str:
-        cached = self.literal_root_promotion_cache.get(root_id)
-        if cached is not None:
-            return cached
-
-        root = self.root_causes.get(root_id)
-        if root is None or root.source_type != "literal_connection":
-            self.literal_root_promotion_cache[root_id] = root_id
-            return root_id
-
-        parts = root.hierarchical_signal.split(".")
-        if len(parts) < 2:
-            self.literal_root_promotion_cache[root_id] = root_id
-            return root_id
-
-        ctx = self.raw_context_map.get(".".join(parts[:-1]))
-        promoted = None
-        if ctx is not None:
-            promoted = self._promote_literal_root_through_parents(
-                ctx,
-                parts[-1],
-                root.constant_value,
-                set(),
-            )
-
-        canonical_root = promoted or root_id
-        self.literal_root_promotion_cache[root_id] = canonical_root
-        if canonical_root != root_id:
-            self.promoted_root_origins[canonical_root].add(root_id)
-        return canonical_root
-
     def _target_nodes_for_root(
         self,
         bits: Iterable[Bit],
@@ -1892,26 +842,10 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
 
         parts = target_signal.split(".")
         target_ctx = self.raw_context_map.get(".".join(parts[:-1])) if len(parts) > 1 else None
-        if target_ctx is not None:
-            local_path = self._estimate_local_source_path(
-                target_ctx, root.hierarchical_signal, target_signal
-            )
-            if local_path:
-                return self._compress_path(local_path)
         target_nodes = self._target_nodes_for_root(bits, target_ctx, root_id)
         root_nodes = self._root_nodes(root_id)
 
         if not target_nodes or not root_nodes:
-            origin_literals = sorted(self.promoted_root_origins.get(root_id, set()))
-            if origin_literals:
-                origin_root = self.root_causes.get(origin_literals[0])
-                if origin_root is not None:
-                    labels = [root.hierarchical_signal]
-                    if origin_root.hierarchical_signal not in labels:
-                        labels.append(origin_root.hierarchical_signal)
-                    if target_signal not in labels:
-                        labels.append(target_signal)
-                    return self._compress_path(labels)
             if root.hierarchical_signal == target_signal:
                 return [target_signal]
             return [root.hierarchical_signal, target_signal]
@@ -1963,8 +897,8 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 continue
 
             local_name = record.hierarchical_signal.split(".")[-1]
-            before_module_info = self.before_rtlil_modules.get(ctx.module_name)
-            opt_module_info = self.opt_rtlil_modules.get(ctx.module_name)
+            before_module_info = self.before_modules.get(ctx.module_name)
+            opt_module_info = self.opt_modules.get(ctx.module_name)
             if before_module_info is None or opt_module_info is None:
                 continue
 
@@ -2002,7 +936,6 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
     def _collect_removed_items(self) -> Dict[str, List[RemovedItem]]:
         removed_instances: List[RemovedItem] = []
         removed_cells: List[RemovedItem] = []
-        seen_removed_cell_paths: Set[str] = set()
 
         for before_ctx in self.before_contexts_preorder:
             raw_ctx = self.raw_context_map.get(before_ctx.path_str)
@@ -2011,10 +944,10 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             opt_ctx = self.opt_context_map.get(before_ctx.path_str)
 
             raw_index = self.module_indices[raw_ctx.module_name]
-            before_module_info = self.before_rtlil_modules.get(before_ctx.module_name)
+            before_module_info = self.before_modules.get(before_ctx.module_name)
             if before_module_info is None:
                 continue
-            opt_module_info = self.opt_rtlil_modules.get(opt_ctx.module_name) if opt_ctx is not None else None
+            opt_module_info = self.opt_modules.get(opt_ctx.module_name) if opt_ctx is not None else None
 
             before_children = set(before_ctx.children)
             opt_children = set(opt_ctx.children) if opt_ctx is not None else set()
@@ -2044,9 +977,8 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 for name, cell in before_module_info.cells.items()
                 if name not in before_children
             }
-            covered_source_instances: Set[str] = set()
             opt_local_signature_counts = Counter(
-                self._rtlil_local_cell_match_key(opt_module_info, cell)
+                self._yosys_local_cell_match_key(opt_module_info, cell)
                 for name, cell in (opt_module_info.cells.items() if opt_module_info is not None else [])
                 if name not in opt_children
                 and not self._is_sequential_cell_type(cell.cell_type)
@@ -2059,7 +991,7 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             before_local_items = sorted(
                 before_local_cells.items(),
                 key=lambda item: (
-                    self._rtlil_local_cell_match_key(before_module_info, item[1]),
+                    self._yosys_local_cell_match_key(before_module_info, item[1]),
                     item[0],
                 ),
             )
@@ -2071,66 +1003,24 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 normalized = self._normalize_cell_type(cell_type)
                 if cell_type not in COMB_CELL_TYPES and normalized == cell_type:
                     continue
-                signature = self._rtlil_local_cell_match_key(before_module_info, cell)
+                signature = self._yosys_local_cell_match_key(before_module_info, cell)
                 if opt_local_signature_counts[signature] > 0:
                     opt_local_signature_counts[signature] -= 1
                     continue
-                source_match = self._match_source_primitive(
-                    before_ctx.module_name,
-                    cell_type,
-                    cell.src,
-                    self._resolve_rtlil_output_signals(before_module_info, cell),
-                )
-                display_name = source_match.instance_name if source_match is not None else cell_name
-                if source_match is not None:
-                    covered_source_instances.add(source_match.instance_name)
                 affected = self._removed_before_local_cell_outputs(raw_ctx, before_module_info, cell)
                 if not affected:
                     continue
                 removed_cells.append(
                     RemovedItem(
                         kind="removed_cell",
-                        path=f"{before_ctx.path_str}.{display_name}",
+                        path=f"{before_ctx.path_str}.{cell_name}",
                         parent_path=before_ctx.path_str,
-                        item_name=display_name,
-                        item_type=source_match.primitive_type if source_match is not None else cell_type,
-                        src=source_match.src if source_match is not None else cell.src,
+                        item_name=cell_name,
+                        item_type=cell_type,
+                        src=cell.src,
                         affected_signals=affected,
                     )
                 )
-                seen_removed_cell_paths.add(f"{before_ctx.path_str}.{display_name}")
-
-            opt_local_names = {
-                name
-                for name in (opt_module_info.cells if opt_module_info is not None else {})
-                if name not in opt_children
-            }
-            before_local_names = set(before_local_cells)
-            for primitive in self.source_primitive_cells.get(before_ctx.module_name, []):
-                item_path = f"{before_ctx.path_str}.{primitive.instance_name}"
-                if item_path in seen_removed_cell_paths:
-                    continue
-                if primitive.instance_name in before_local_names:
-                    continue
-                if primitive.instance_name in covered_source_instances:
-                    continue
-                if primitive.instance_name in opt_local_names:
-                    continue
-                affected = self._removed_source_cell_outputs(raw_ctx, primitive)
-                if not affected:
-                    continue
-                removed_cells.append(
-                    RemovedItem(
-                        kind="removed_cell",
-                        path=item_path,
-                        parent_path=before_ctx.path_str,
-                        item_name=primitive.instance_name,
-                        item_type=primitive.primitive_type,
-                        src=primitive.src,
-                        affected_signals=affected,
-                    )
-                )
-                seen_removed_cell_paths.add(item_path)
 
         return {
             "removed_instances": removed_instances,
@@ -2138,8 +1028,8 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
         }
 
     def analyze_design(self) -> Dict:
-        print("步骤 1: 导出 raw JSON 以及 raw_proc/opt_proc RTLIL...")
-        self._export_raw_opt_jsons()
+        print("步骤 1: 导出 raw/opt JSON、noopt RTLIL，并附带 raw/opt RTLIL 差分证据...")
+        self._export_yosys_designs()
 
         print("步骤 2: 基于 raw JSON 建立层次索引并执行常量传播...")
         self._reset_constant_state()
@@ -2153,9 +1043,9 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
         self.raw_context_map = self._context_map(self.all_contexts_preorder)
         self._build_flow_graph()
 
-        print("步骤 3: 构建 raw_proc/opt_proc RTLIL 层次并对比缺失实例和单元...")
-        _, self.before_contexts_preorder, _ = self._build_rtlil_context_tree(self.before_rtlil_modules)
-        _, self.opt_contexts_preorder, self.opt_context_map = self._build_rtlil_context_tree(self.opt_rtlil_modules)
+        print("步骤 3: 构建 raw/opt Yosys JSON 层次并对比缺失实例和单元...")
+        _, self.before_contexts_preorder, _ = self._build_yosys_context_tree(self.before_modules)
+        _, self.opt_contexts_preorder, self.opt_context_map = self._build_yosys_context_tree(self.opt_modules)
 
         diff_findings = self._collect_removed_items()
 
@@ -2172,16 +1062,6 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 for root_id in affected.roots
             }
         )
-        referenced_source_root_map: Dict[Tuple[str, str, str], SourceDirectRoot] = {}
-        for item in structural_items:
-            for affected in item.affected_signals:
-                for source_root in affected.source_direct_roots:
-                    key = (source_root.signal, source_root.value, source_root.location)
-                    referenced_source_root_map[key] = source_root
-        referenced_source_roots = [
-            referenced_source_root_map[key]
-            for key in sorted(referenced_source_root_map)
-        ]
 
         summary = {
             "removed_instance_count": len(removed_instances),
@@ -2189,7 +1069,6 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             "constantized_signal_count": len(constantized_signals),
             "affected_signal_count": total_affected_signals,
             "referenced_root_count": len(referenced_roots),
-            "referenced_source_direct_root_count": len(referenced_source_roots),
             "conflict_count": len(self.conflicts),
             "potential_issues": [],
         }
@@ -2213,10 +1092,6 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             summary["potential_issues"].append(
                 f"已将结构优化项关联到 {summary['referenced_root_count']} 个显式常量根源。"
             )
-        if summary["referenced_source_direct_root_count"] > 0:
-            summary["potential_issues"].append(
-                f"源码回溯发现 {summary['referenced_source_direct_root_count']} 个直接常量赋值根源。"
-            )
         if summary["conflict_count"] > 0:
             summary["potential_issues"].append(
                 f"raw 常量传播阶段发现 {summary['conflict_count']} 个冲突推断。"
@@ -2234,38 +1109,19 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
             "removed_cells": [asdict(item) for item in removed_cells],
             "constantized_signals": [asdict(item) for item in constantized_signals],
             "referenced_roots": referenced_root_records,
-            "referenced_source_direct_roots": [asdict(root) for root in referenced_source_roots],
             "raw_constant_signal_count": len(self.raw_signal_records),
             "raw_conflicts": list(self.conflicts),
             "extra_exports": {
                 "raw_json": "raw_design.json",
+                "opt_json": "opt_design.json",
                 "raw_proc_il": "raw_proc.il",
                 "opt_proc_il": "opt_proc.il",
+                "noopt_proc_il": "noopt_proc.il",
             },
         }
 
     def build_json_report(self, analysis_results: Dict) -> Dict:
         summary = analysis_results["summary"]
-        def convert_source_root(root: Dict) -> Dict:
-            return {
-                "信号": root.get("signal", ""),
-                "常量值": root.get("value", ""),
-                "源码位置": root.get("location", ""),
-                "赋值语句": root.get("expression", ""),
-            }
-
-        def source_roots_from_affected(signals: List[Dict]) -> List[Dict]:
-            roots: Dict[Tuple[str, str, str], Dict] = {}
-            for affected in signals:
-                for root in affected.get("source_direct_roots", []):
-                    key = (
-                        root.get("signal", ""),
-                        root.get("value", ""),
-                        root.get("location", ""),
-                    )
-                    roots[key] = root
-            return [convert_source_root(roots[key]) for key in sorted(roots)]
-
         def convert_path(path_item: Dict) -> Dict:
             return {
                 "根源ID": path_item["root_id"],
@@ -2283,10 +1139,6 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 "根源": affected.get("roots", []),
                 "原因": affected.get("reason", ""),
                 "传播路径": [convert_path(item) for item in affected.get("propagation_paths", [])],
-                "源码直接常量根源": [
-                    convert_source_root(item)
-                    for item in affected.get("source_direct_roots", [])
-                ],
             }
 
         def convert_removed_item(item: Dict) -> Dict:
@@ -2310,7 +1162,6 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                 "raw驱动": item.get("before_driver", ""),
                 "raw已折叠值": item.get("raw_folded_value", ""),
                 "优化后常量值": item.get("after_value", ""),
-                "源码直接常量根源": source_roots_from_affected(item.get("affected_signals", [])),
                 "受影响信号": [convert_affected(sig) for sig in item.get("affected_signals", [])],
             }
 
@@ -2340,7 +1191,6 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                     "优化后被直接常量化的信号数量": summary["constantized_signal_count"],
                     "受影响信号数量": summary["affected_signal_count"],
                     "关联到的显式根源数量": summary["referenced_root_count"],
-                    "源码直接常量根源数量": summary["referenced_source_direct_root_count"],
                     "raw传播冲突数量": summary["conflict_count"],
                     "潜在问题": list(summary["potential_issues"]),
                 },
@@ -2351,16 +1201,14 @@ class OptimizationDiffRemovedTracer(ConstantTracer):
                     for item in analysis_results["constantized_signals"]
                 ],
                 "关联到的显式常量根源": [convert_root(root) for root in analysis_results["referenced_roots"]],
-                "关联到的源码直接常量根源": [
-                    convert_source_root(root)
-                    for root in analysis_results["referenced_source_direct_roots"]
-                ],
                 "raw常量信号数量": analysis_results["raw_constant_signal_count"],
                 "raw传播冲突": analysis_results["raw_conflicts"],
                 "附加导出文件": {
                     "raw_json": analysis_results["extra_exports"]["raw_json"],
+                    "opt_json": analysis_results["extra_exports"]["opt_json"],
                     "raw_proc_il": analysis_results["extra_exports"]["raw_proc_il"],
                     "opt_proc_il": analysis_results["extra_exports"]["opt_proc_il"],
+                    "noopt_proc_il": analysis_results["extra_exports"]["noopt_proc_il"],
                 },
             },
         }
@@ -2383,7 +1231,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(
         description=(
-            "对比 raw_proc/opt_proc 层次网表，定位被删除的实例、组合单元或被直接常量化的输出信号，"
+            "对比 raw/opt Yosys JSON 层次网表，定位被删除的实例、组合单元或被直接常量化的输出信号，"
             "并将其受影响的常量信号回溯到显式根源。"
         )
     )
@@ -2430,11 +1278,15 @@ def main() -> int:
             encoding="utf-8",
         )
         raw_json_path = output_dir / "raw_design.json"
+        opt_json_path = output_dir / "opt_design.json"
         raw_proc_path = output_dir / "raw_proc.il"
         opt_proc_path = output_dir / "opt_proc.il"
+        noopt_proc_path = output_dir / "noopt_proc.il"
         raw_json_path.write_text(tracer.raw_json_text, encoding="utf-8")
+        opt_json_path.write_text(tracer.opt_json_text, encoding="utf-8")
         raw_proc_path.write_text(tracer.raw_proc_rtlil_text, encoding="utf-8")
         opt_proc_path.write_text(tracer.opt_proc_rtlil_text, encoding="utf-8")
+        noopt_proc_path.write_text(tracer.noopt_proc_rtlil_text, encoding="utf-8")
         summary = results["summary"]
         print(
             "\n摘要: "
@@ -2443,14 +1295,15 @@ def main() -> int:
             f"直接常量化信号={summary['constantized_signal_count']}，"
             f"受影响信号={summary['affected_signal_count']}，"
             f"关联根源={summary['referenced_root_count']}，"
-            f"源码直接根源={summary['referenced_source_direct_root_count']}，"
             f"冲突={summary['conflict_count']}"
         )
         print(f"\n输出目录: {output_dir}")
         print(f"\n报告已保存到: {output_path}")
         print(f"附加导出文件: {raw_json_path}")
+        print(f"附加导出文件: {opt_json_path}")
         print(f"附加导出文件: {raw_proc_path}")
         print(f"附加导出文件: {opt_proc_path}")
+        print(f"附加导出文件: {noopt_proc_path}")
 
         has_issue = bool(
             results["removed_instances"]
