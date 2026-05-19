@@ -31,7 +31,7 @@ def resolve_paths() -> tuple[Path, Path, Path]:
     scripts_dir = script_path.parent
     skill_dir = scripts_dir.parent
     project_root = skill_dir.parent.parent
-    tool = scripts_dir / "vendor" / "trace_removed_path.py"
+    tool = scripts_dir / "vendor" / "trace_constant_propagation.py"
     if not tool.exists():
         raise SystemExit(f"missing detector script: {tool}")
     return skill_dir, project_root, tool
@@ -64,28 +64,16 @@ def build_diagnosis_bundle(
         "design_inputs": [str(Path(item).resolve()) for item in inputs],
         "artifacts": {
             "report_json": str(output_path.resolve()),
-            "raw_design_json": str((output_dir / "raw_design.json").resolve()),
-            "opt_design_json": str((output_dir / "opt_design.json").resolve()),
-            "noopt_proc_rtlil": str((output_dir / "noopt_proc.il").resolve()),
-            "raw_proc_rtlil": str((output_dir / "raw_proc.il").resolve()),
-            "opt_proc_rtlil": str((output_dir / "opt_proc.il").resolve()),
         },
         "final_diagnosis_required_inputs": [
             "json_report",
-            "raw_design_json",
-            "noopt_proc_rtlil",
             "source_code",
         ],
-        "final_diagnosis_optional_audit_inputs": [
-            "opt_design_json",
-            "raw_proc_rtlil",
-            "opt_proc_rtlil",
-        ],
+        "final_diagnosis_optional_audit_inputs": [],
         "final_diagnosis_workflow": [
-            "先读取 JSON 报告，重点查看“源码相比优化后少掉的逻辑”。",
-            "再对照 raw_design.json 和 noopt_proc.il，确认最终常量事实、直接常量根和未优化组合传播链。",
-            "需要复核优化结果时，再读取 opt_design.json、raw_proc.il 和 opt_proc.il。",
-            "最后回到源代码，阅读根源和少掉逻辑附近的源码，判断这是设计预期常量还是疑似真实缺陷。",
+            "先读取 JSON 报告，重点查看“最源头常量引脚和线网”“按根源分组的污染常量集合”“层次化常量输出”。",
+            "回到源代码，阅读根源、污染信号和相关模块附近的源码语义。",
+            "结合命名、注释、配置意图和控制/数据路径语义，判断这是设计预期常量还是疑似真实缺陷。",
         ],
     }
     bundle_path.write_text(
@@ -113,7 +101,7 @@ def main() -> int:
     report_root = project_root / "reports"
     output_dir = build_output_dir(report_root)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "trace_removed_path_report.json"
+    output_path = output_dir / "trace_constant_propagation_report.json"
 
     cmd = [
         sys.executable,

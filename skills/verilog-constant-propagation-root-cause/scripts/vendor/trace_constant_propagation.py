@@ -2246,7 +2246,7 @@ def main() -> int:
     parser.add_argument("--top", default="top_module", help="顶层模块名")
     parser.add_argument(
         "--output",
-        default="constant_hierarchical_analysis_report.json",
+        default="trace_constant_propagation_report.json",
         help="输出 JSON 报告文件",
     )
     parser.add_argument(
