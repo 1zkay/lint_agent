@@ -139,7 +139,6 @@ class AppChainlitDataLayer(ChainlitDataLayer):
 
     说明：
     - 这是官方支持的自定义数据层方式；
-    - 兼容 update_thread 的 metadata 为空场景；
     - 兼容 Step 时间戳字符串不是 UTC ...Z 格式时，官方 create_step 的严格解析。
     """
 
@@ -184,23 +183,6 @@ class AppChainlitDataLayer(ChainlitDataLayer):
 
     async def update_step(self, step_dict):
         return await super().update_step(self._normalize_step_timestamps(step_dict))
-
-    async def update_thread(
-        self,
-        thread_id: str,
-        name: str | None = None,
-        user_id: str | None = None,
-        metadata: dict | None = None,
-        tags: list[str] | None = None,
-    ):
-        safe_metadata = {} if metadata is None else metadata
-        return await super().update_thread(
-            thread_id=thread_id,
-            name=name,
-            user_id=user_id,
-            metadata=safe_metadata,
-            tags=tags,
-        )
 
 
 class AppS3StorageClient(S3StorageClient):
