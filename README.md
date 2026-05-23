@@ -199,7 +199,7 @@ cd <project-root>
 ```
 
 The Ubuntu script assumes PostgreSQL and pgvector are already installed and running on the host.
-It also assumes local MinIO binaries already exist at `.local/minio/bin/minio` and `.local/minio/bin/mc`.
+It downloads local MinIO into `.local/minio/bin` when needed; the data directory is `.local/minio/data`.
 It finds or clones the sibling `chainlit-datalayer` repository before running `npx prisma migrate deploy`.
 The application PostgreSQL role is `lint_agent` with password `123456`, matching `.env.example`; `--super-user` and `--super-password` are only used for the PostgreSQL administrator connection.
 

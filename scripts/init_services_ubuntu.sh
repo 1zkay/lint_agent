@@ -20,6 +20,8 @@ MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-9001}"
 MINIO_BUCKET="${MINIO_BUCKET:-chainlit-files}"
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin123}"
+MINIO_DOWNLOAD_URL="${MINIO_DOWNLOAD_URL:-https://dl.min.io/server/minio/release/linux-amd64/minio}"
+MC_DOWNLOAD_URL="${MC_DOWNLOAD_URL:-https://dl.min.io/client/mc/release/linux-amd64/mc}"
 MINIO_START_TIMEOUT="${MINIO_START_TIMEOUT:-15}"
 SKIP_MINIO_SETUP=0
 SKIP_CHAINLIT_MIGRATION=0
@@ -30,7 +32,7 @@ usage() {
 Usage: init_services_ubuntu.sh [options]
 
 Initialize the local ALINT-PRO services on Ubuntu. This script assumes psql is
-available and MinIO/mc are already installed under <app-dir>/.local/minio/bin.
+available and downloads MinIO/mc under <app-dir>/.local/minio/bin when needed.
 
 Options:
   --pg-host VALUE                  PostgreSQL host (default: 127.0.0.1)
@@ -54,6 +56,8 @@ Options:
   --minio-bucket VALUE             MinIO bucket (default: chainlit-files)
   --minio-root-user VALUE          MinIO root user (default: minioadmin)
   --minio-root-password VALUE      MinIO root password (default: minioadmin123)
+  --minio-download-url VALUE       MinIO server download URL
+  --mc-download-url VALUE          MinIO client download URL
   --minio-start-timeout VALUE      MinIO startup timeout seconds (default: 15)
   --skip-minio-setup               Do not start MinIO or create bucket
   --skip-chainlit-migration        Do not run Prisma migrations
@@ -92,6 +96,8 @@ while [[ $# -gt 0 ]]; do
     --minio-bucket) MINIO_BUCKET="${2:?}"; shift 2 ;;
     --minio-root-user) MINIO_ROOT_USER="${2:?}"; shift 2 ;;
     --minio-root-password) MINIO_ROOT_PASSWORD="${2:?}"; shift 2 ;;
+    --minio-download-url) MINIO_DOWNLOAD_URL="${2:?}"; shift 2 ;;
+    --mc-download-url) MC_DOWNLOAD_URL="${2:?}"; shift 2 ;;
     --minio-start-timeout) MINIO_START_TIMEOUT="${2:?}"; shift 2 ;;
     --skip-minio-setup) SKIP_MINIO_SETUP=1; shift ;;
     --skip-chainlit-migration) SKIP_CHAINLIT_MIGRATION=1; shift ;;
@@ -291,6 +297,40 @@ wait_minio_ready() {
   die "MinIO did not become ready within ${MINIO_START_TIMEOUT}s. Check port ${MINIO_API_PORT} and $APP_DIR/.local/minio/minio.log."
 }
 
+ensure_downloaded_file() {
+  local url="$1"
+  local output_path="$2"
+  local name="$3"
+  local tmp_path="${output_path}.tmp"
+
+  if [[ -f "$output_path" ]]; then
+    log "$name already exists: $output_path"
+    chmod +x "$output_path"
+    return
+  fi
+
+  mkdir -p "$(dirname -- "$output_path")"
+  rm -f "$tmp_path"
+  log "Downloading $name to: $output_path"
+
+  if command -v curl >/dev/null; then
+    curl -fL --retry 3 -o "$tmp_path" "$url" || {
+      rm -f "$tmp_path"
+      die "Download failed for $name: $url"
+    }
+  elif command -v wget >/dev/null; then
+    wget -O "$tmp_path" "$url" || {
+      rm -f "$tmp_path"
+      die "Download failed for $name: $url"
+    }
+  else
+    die "curl or wget is required to download $name."
+  fi
+
+  mv "$tmp_path" "$output_path"
+  chmod +x "$output_path"
+}
+
 start_local_minio() {
   if tcp_port_open "$MINIO_HOST" "$MINIO_API_PORT"; then
     log "MinIO API port is already open: ${MINIO_HOST}:${MINIO_API_PORT}"
@@ -329,6 +369,8 @@ ensure_minio() {
     log "Skipping MinIO setup."
     return
   fi
+  ensure_downloaded_file "$MINIO_DOWNLOAD_URL" "$MINIO_EXE" "minio"
+  ensure_downloaded_file "$MC_DOWNLOAD_URL" "$MC_EXE" "mc"
   start_local_minio
   ensure_minio_bucket
 }
