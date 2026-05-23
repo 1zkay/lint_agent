@@ -5,7 +5,7 @@ param(
     [int]$PgPort = 5432,
     [string]$SuperUser = "postgres",
     [string]$SuperPassword = "123456",
-    [string]$AppUser = "postgres",
+    [string]$AppUser = "lint_agent",
     [string]$AppPassword = "123456",
     [string]$LangGraphDb = "langgraph_db",
     [string]$ChainlitDb = "chainlit_db",
@@ -292,6 +292,14 @@ function Quote-PgIdentifier {
 function Quote-PgLiteral {
     param([string]$Value)
     return "'" + ($Value -replace "'", "''") + "'"
+}
+
+function Test-SamePgRole {
+    param(
+        [string]$Left,
+        [string]$Right
+    )
+    return [string]::Equals($Left, $Right, [StringComparison]::Ordinal)
 }
 
 function ConvertTo-UrlComponent {
@@ -600,6 +608,10 @@ $script:ResolvedMinioBinDir = Resolve-AppPath -Value $MinioBinDir -DefaultRelati
 $script:ResolvedMinioDataDir = Resolve-AppPath -Value $MinioDataDir -DefaultRelativePath ".local\minio\data"
 $script:ResolvedMinioExe = Join-Path $script:ResolvedMinioBinDir "minio.exe"
 $script:ResolvedMcExe = Join-Path $script:ResolvedMinioBinDir "mc.exe"
+
+if (Test-SamePgRole -Left $AppUser -Right $SuperUser) {
+    throw "AppUser must be a dedicated PostgreSQL role, not the PostgreSQL administrator. Use the role configured in .env, for example -AppUser lint_agent -AppPassword 123456."
+}
 
 Write-Info "Project directory: $script:ResolvedAppDir"
 Write-Info "Using psql: $script:PsqlExe"

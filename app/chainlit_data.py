@@ -40,9 +40,6 @@ def _can_connect(host: str, port: int, timeout: float = 0.5) -> bool:
 def _start_local_minio_if_needed() -> None:
     global _LOCAL_MINIO_PROCESS
 
-    if os.name != "nt":
-        return
-
     if not config.local_minio_auto_start:
         return
 

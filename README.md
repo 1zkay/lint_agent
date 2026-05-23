@@ -138,7 +138,7 @@ Copy-Item .env.example .env
 Use `.env.example` as the source of truth for variable names and inline comments.
 The `.env` file is ignored by Git and should not be committed.
 
-## Windows Service Initialization
+## Local Service Initialization
 
 Persistence initialization in this project has four parts:
 
@@ -159,9 +159,7 @@ if (!(Test-Path .env)) { Copy-Item .env.example .env }
 
 .\scripts\init_services_windows.ps1 `
   -SuperUser postgres `
-  -SuperPassword "<postgres-admin-password>" `
-  -AppUser postgres `
-  -AppPassword "<app-password>"
+  -SuperPassword "<postgres-admin-password>"
 ```
 
 The script performs these steps:
@@ -175,18 +173,35 @@ The script performs these steps:
 - Starts MinIO and creates the bucket named by `BUCKET_NAME`.
 - Does not modify `.env`; script parameters and `.env` values should stay consistent with `.env.example`.
 
+By default, the application PostgreSQL role is `lint_agent` with password `123456`, matching `.env.example`.
+`SuperUser` and `SuperPassword` are only used for the PostgreSQL administrator connection and are not written into `.env`.
+
 If `psql.exe` is not in `PATH`, pass it explicitly:
 
 ```powershell
 .\scripts\init_services_windows.ps1 `
   -PsqlPath "<path-to-psql.exe>" `
   -SuperUser postgres `
-  -SuperPassword "<postgres-admin-password>" `
-  -AppUser postgres `
-  -AppPassword "<app-password>"
+  -SuperPassword "<postgres-admin-password>"
 ```
 
 If PostgreSQL does not have pgvector installed, follow the [official pgvector Windows installation instructions](https://github.com/pgvector/pgvector#windows) to prepare the Visual Studio C++ build tools. Run this script as an administrator from the Visual Studio x64 Native Tools environment, or ensure that `nmake` and `cl` are already in `PATH`. By default, the script clones the pgvector source into `.local/pgvector/<version>`, and the installation target is inferred from the PostgreSQL root directory associated with `psql.exe`. You can override this with `-PgRoot`, `-PgVectorSourceDir`, and `-PgVectorVersion`.
+
+Ubuntu local service initialization script:
+
+```bash
+cd <project-root>
+[ -f .env ] || cp .env.example .env
+
+./scripts/init_services_ubuntu.sh \
+  --super-user postgres \
+  --super-password "<postgres-admin-password>"
+```
+
+The Ubuntu script assumes PostgreSQL and pgvector are already installed and running on the host.
+It also assumes local MinIO binaries already exist at `.local/minio/bin/minio` and `.local/minio/bin/mc`.
+It finds or clones the sibling `chainlit-datalayer` repository before running `npx prisma migrate deploy`.
+The application PostgreSQL role is `lint_agent` with password `123456`, matching `.env.example`; `--super-user` and `--super-password` are only used for the PostgreSQL administrator connection.
 
 Equivalent command for running the Chainlit data layer migration manually:
 
