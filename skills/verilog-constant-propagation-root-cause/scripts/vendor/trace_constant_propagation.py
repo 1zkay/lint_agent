@@ -9,8 +9,8 @@
 
 说明：
 - 该工具依赖 Yosys 导出 normal JSON 与 noopt RTLIL 两种语义视图。
-- normal JSON 用于识别最终常量事实和跨层次传播；noopt RTLIL 用于保留直接常量根和模块内部组合依赖。
-- normal 已确认但 noopt 未触达的模块输入会作为 noopt 兜底归因种子；noopt 只在 normal 同值校验通过后沿实例端口传递根因，不新增最终常量事实。
+- normal JSON 用于识别最终常量事实；noopt RTLIL 用于保留直接常量根、结构连接和模块内部组合依赖。
+- noopt 沿直接 connect 和实例端口映射传播根因；normal JSON 仍作为最终常量事实的报告过滤依据。
 - 报告重点是“根源常量 -> 层次污染集合”，而不是仅仅对比顶层优化前后差异。
 """
 
@@ -1230,24 +1230,6 @@ class ConstantTracer:
                 )
         return changed
 
-    def _normal_confirms_noopt_state(
-        self,
-        ctx: InstanceContext,
-        bits: List[Bit],
-        signal_name: str,
-        state: ConstEvidence,
-    ) -> bool:
-        resolved = self._resolve_signal_constant(
-            ctx,
-            bits,
-            self._hier_signal(ctx, signal_name),
-        )
-        if resolved is None:
-            return False
-
-        const_value, _ = resolved
-        return const_value == self._format_const_value([state.value])
-
     def _propagate_noopt_parent_to_children(self, ctx: InstanceContext) -> bool:
         changed = False
         module_index = self.module_indices[ctx.module_name]
@@ -1294,13 +1276,6 @@ class ConstantTracer:
                     )
                 if parent_state is None or not parent_state.root_ids:
                     continue
-                if not self._normal_confirms_noopt_state(
-                    child_ctx,
-                    child_bits,
-                    port_name,
-                    parent_state,
-                ):
-                    continue
 
                 changed |= self._noopt_assign_const(
                     child_ctx,
@@ -1308,7 +1283,7 @@ class ConstantTracer:
                     parent_state.value,
                     parent_state.root_ids,
                     (
-                        f"normal JSON 已确认跨层次输入 "
+                        f"noopt RTLIL 跨层次输入 "
                         f"{self._hier_signal(child_ctx, port_name)} = "
                         f"{self._format_const_value([parent_state.value])}；"
                         f"noopt RTLIL 从父实例 {ctx.path_str}.{cell_name}.{port_name} "
@@ -1351,16 +1326,6 @@ class ConstantTracer:
                     continue
 
                 parent_token = parent_tokens[0]
-                parent_bits = module_index.name_to_bits.get(parent_token, [])
-                if len(parent_bits) != 1:
-                    continue
-                if not self._normal_confirms_noopt_state(
-                    ctx,
-                    parent_bits,
-                    parent_token,
-                    child_state,
-                ):
-                    continue
 
                 changed |= self._noopt_assign_const(
                     ctx,
@@ -1368,7 +1333,7 @@ class ConstantTracer:
                     child_state.value,
                     child_state.root_ids,
                     (
-                        f"normal JSON 已确认跨层次输出 "
+                        f"noopt RTLIL 跨层次输出 "
                         f"{self._hier_signal(ctx, parent_token)} = "
                         f"{self._format_const_value([child_state.value])}；"
                         f"noopt RTLIL 从子实例 {child_ctx.path_str}.{port_name} "
@@ -2239,7 +2204,7 @@ class ConstantTracer:
                     "该工具会跨模块、跨实例向下和向上追踪常量传播。",
                     "对触发器、锁存器、存储器等时序单元默认作为传播边界，不把其输出直接判定为常量。",
                     "最终常量事实依据 normal Yosys JSON 识别；直接常量根和模块内部污染传播集合依据 read_verilog -noopt + proc -noopt 导出的 RTLIL 组合图追踪。",
-                    "normal JSON 已确认但 noopt 未触达的模块输入会作为 noopt RTLIL 的兜底归因种子；noopt 只在 normal 同值校验通过后沿实例端口传递根因，用于接上跨模块进入模块内部的源码级传播；noopt 不新增最终常量事实。",
+                    "noopt RTLIL 沿直接 connect 和实例端口映射传播已知常量根；normal JSON 已确认但 noopt 未触达的模块输入会作为 noopt RTLIL 的兜底归因种子；noopt 不新增最终常量事实，最终报告仍由 normal JSON 常量事实过滤。",
                     "源码仅通过 Yosys src 属性作为定位上下文，不使用源码正则推断根因。",
                     "常量根因按信号连接点精确归属；若 noopt RTLIL 也无法保留依赖，报告不会把同值常量线网合并为候选根因。",
                 ],
