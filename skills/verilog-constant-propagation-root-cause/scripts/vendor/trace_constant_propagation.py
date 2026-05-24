@@ -1174,62 +1174,6 @@ class ConstantTracer:
                     f"{self._hier_signal(ctx, signal_name)} 是直接常量根源",
                 )
 
-    def _noopt_input_seed_names(self, ctx: InstanceContext) -> Set[str]:
-        module_index = self.module_indices[ctx.module_name]
-        return {
-            name
-            for name, direction in module_index.port_directions.items()
-            if name in module_index.name_to_bits and not name.startswith("$")
-            if direction in {"input", "inout"}
-        }
-
-    def _seed_noopt_from_normal_input_constants(self) -> bool:
-        """Use normal-proven module input constants as noopt fallback seeds.
-
-        normal JSON remains the source of truth for final constant facts.  These
-        fallback seeds only bridge constants that noopt port propagation did not
-        reach into the module-local graph.
-        """
-        changed = False
-        for ctx in self.all_contexts_preorder:
-            module_index = self.module_indices[ctx.module_name]
-            for signal_name in sorted(self._noopt_input_seed_names(ctx)):
-                if self._noopt_key(ctx, signal_name) in self.noopt_const_map:
-                    continue
-
-                bits = module_index.name_to_bits.get(signal_name, [])
-                if len(bits) != 1:
-                    continue
-
-                resolved = self._resolve_signal_constant(
-                    ctx,
-                    bits,
-                    self._hier_signal(ctx, signal_name),
-                )
-                if resolved is None:
-                    continue
-
-                const_value, root_ids = resolved
-                if not root_ids:
-                    continue
-
-                bit_values = self._rtlil_const_to_bit_values(const_value)
-                if not bit_values or len(bit_values) != 1:
-                    continue
-
-                changed |= self._noopt_assign_const(
-                    ctx,
-                    signal_name,
-                    bit_values[0],
-                    root_ids,
-                    (
-                        f"normal JSON 已确认模块输入 "
-                        f"{self._hier_signal(ctx, signal_name)} = {const_value}；"
-                        "作为 noopt RTLIL 模块内归因兜底种子"
-                    ),
-                )
-        return changed
-
     def _propagate_noopt_parent_to_children(self, ctx: InstanceContext) -> bool:
         changed = False
         module_index = self.module_indices[ctx.module_name]
@@ -1531,8 +1475,6 @@ class ConstantTracer:
 
         self._seed_noopt_direct_roots()
         self._run_noopt_propagation_loop()
-        if self._seed_noopt_from_normal_input_constants():
-            self._run_noopt_propagation_loop()
 
     # ------------------------------------------------------------------
     # 固定点传播
@@ -2204,7 +2146,7 @@ class ConstantTracer:
                     "该工具会跨模块、跨实例向下和向上追踪常量传播。",
                     "对触发器、锁存器、存储器等时序单元默认作为传播边界，不把其输出直接判定为常量。",
                     "最终常量事实依据 normal Yosys JSON 识别；直接常量根和模块内部污染传播集合依据 read_verilog -noopt + proc -noopt 导出的 RTLIL 组合图追踪。",
-                    "noopt RTLIL 沿直接 connect 和实例端口映射传播已知常量根；normal JSON 已确认但 noopt 未触达的模块输入会作为 noopt RTLIL 的兜底归因种子；noopt 不新增最终常量事实，最终报告仍由 normal JSON 常量事实过滤。",
+                    "noopt RTLIL 沿直接 connect 和实例端口映射传播已知常量根；noopt 不新增最终常量事实，最终报告仍由 normal JSON 常量事实过滤。",
                     "源码仅通过 Yosys src 属性作为定位上下文，不使用源码正则推断根因。",
                     "常量根因按信号连接点精确归属；若 noopt RTLIL 也无法保留依赖，报告不会把同值常量线网合并为候选根因。",
                 ],
