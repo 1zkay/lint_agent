@@ -25,7 +25,7 @@ def register_netlist_tools(mcp) -> None:
         verilog_output: Optional[str] = None,
         json_output: Optional[str] = None,
         top: Optional[str] = None,
-        oss_root: Optional[str] = None,
+        yosys_search_root: Optional[str] = None,
     ) -> dict:
         """使用 Yosys 导出门级网表 Verilog/JSON。"""
         if not AST_AVAILABLE or not run_yosys_for_netlist:
@@ -51,7 +51,7 @@ def register_netlist_tools(mcp) -> None:
             if json_output
             else str(out_dir / f"{base_name}_netlist.json")
         )
-        resolved_oss = Path(oss_root).resolve() if oss_root else None
+        resolved_yosys_search_root = Path(yosys_search_root).resolve() if yosys_search_root else None
 
         temp_root = None
         try:
@@ -61,7 +61,7 @@ def register_netlist_tools(mcp) -> None:
             run_yosys_for_netlist(
                 temp_files, incdirs=temp_incdirs, defines=[],
                 verilog_out=verilog_output, json_out=json_output,
-                oss_root=resolved_oss, top=top,
+                yosys_search_root=resolved_yosys_search_root, top=top,
             )
         except Exception as exc:
             return {"error": f"{type(exc).__name__}: {exc}"}

@@ -5,13 +5,17 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from eda.yosys import YosysLocation, build_yosys_env, find_yosys
 
 
 def configure_stdio_utf8() -> None:
@@ -48,63 +52,30 @@ def build_output_dir(report_root: Path) -> Path:
     return output_dir
 
 
-def candidate_yosys_paths(start_points: Iterable[Path]) -> Iterable[Path]:
-    env_bin = os.environ.get("YOSYS_BIN")
-    if env_bin:
-        yield Path(env_bin)
-
-    which = shutil.which("yosys")
-    if which:
-        yield Path(which)
-
-    seen: set[Path] = set()
-    for start in start_points:
-        for parent in [start, *start.parents]:
-            if parent in seen:
-                continue
-            seen.add(parent)
-            yield parent / "oss-cad-suite" / "bin" / "yosys.exe"
-
-
-def find_yosys(explicit: str | None, start_points: Iterable[Path]) -> Path:
-    if explicit:
-        path = Path(explicit)
-        if path.exists():
-            return path
-        raise FileNotFoundError(f"Yosys not found: {path}")
-
-    for path in candidate_yosys_paths(start_points):
-        if path.exists():
-            return path
-    raise FileNotFoundError("Yosys executable not found. Set --yosys or YOSYS_BIN.")
-
-
-def yosys_command(yosys_path: Path, script_path: Path) -> list[str]:
-    env_bat = yosys_path.parent.parent / "environment.bat"
+def yosys_command(yosys: YosysLocation, script_path: Path) -> list[str]:
+    env_bat = (yosys.root or yosys.bin.parent.parent) / "environment.bat"
     if os.name == "nt" and env_bat.exists():
         return [
             "cmd",
             "/c",
             f"call {env_bat} && yosys -q -s {script_path}",
         ]
-    return [str(yosys_path), "-q", "-s", str(script_path)]
+    return [str(yosys.bin), "-q", "-s", str(script_path)]
 
 
 def yosys_path(path: Path) -> str:
     return path.resolve().as_posix()
 
 
-def run_yosys(yosys_bin: Path, script: str) -> None:
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUTF8"] = "1"
+def run_yosys(yosys: YosysLocation, script: str) -> None:
+    env = build_yosys_env(yosys)
     with tempfile.NamedTemporaryFile("w", suffix=".ys", delete=False, encoding="utf-8") as handle:
         handle.write(script)
         handle.write("\n")
         script_path = Path(handle.name)
     try:
         result = subprocess.run(
-            yosys_command(yosys_bin, script_path),
+            yosys_command(yosys, script_path),
             text=True,
             capture_output=True,
             encoding="utf-8",
@@ -219,7 +190,11 @@ def main() -> int:
     )
     parser.add_argument("inputs", nargs="+", help="HDL source files or source directories")
     parser.add_argument("--top", required=True, help="top module name")
-    parser.add_argument("--yosys", default=None, help="optional Yosys executable path")
+    parser.add_argument(
+        "--yosys",
+        default=None,
+        help="optional Yosys executable path; defaults to .env YOSYS_BIN/YOSYS_SEARCH_ROOT",
+    )
     args = parser.parse_args()
 
     skill_dir, project_root = resolve_paths()
@@ -228,7 +203,7 @@ def main() -> int:
 
     try:
         files = collect_design_files(args.inputs)
-        yosys_bin = find_yosys(args.yosys, [Path.cwd(), skill_dir, project_root])
+        yosys = find_yosys(explicit_bin=args.yosys, start_points=[Path.cwd(), skill_dir, project_root])
         base = read_cmd(files) + f"hierarchy -check -top {args.top}; "
 
         pre_proc = output_dir / "pre_proc.il"
@@ -236,17 +211,17 @@ def main() -> int:
         raw_proc_ifx = output_dir / "raw_proc_ifx_noopt.il"
         opt_proc = output_dir / "opt_proc.il"
 
-        run_yosys(yosys_bin, base + f"write_rtlil {yosys_path(pre_proc)}")
-        run_yosys(yosys_bin, base + f"proc; write_rtlil {yosys_path(raw_proc)}")
-        run_yosys(yosys_bin, base + f"proc -ifx -noopt; write_rtlil {yosys_path(raw_proc_ifx)}")
-        run_yosys(yosys_bin, base + f"proc; opt -purge; write_rtlil {yosys_path(opt_proc)}")
+        run_yosys(yosys, base + f"write_rtlil {yosys_path(pre_proc)}")
+        run_yosys(yosys, base + f"proc; write_rtlil {yosys_path(raw_proc)}")
+        run_yosys(yosys, base + f"proc -ifx -noopt; write_rtlil {yosys_path(raw_proc_ifx)}")
+        run_yosys(yosys, base + f"proc; opt -purge; write_rtlil {yosys_path(opt_proc)}")
 
         artifacts_path = build_artifacts_json(
             output_dir=output_dir,
             top=args.top,
             inputs=list(args.inputs),
             files=files,
-            yosys_bin=yosys_bin,
+            yosys_bin=yosys.bin,
         )
 
         safe_print(f"SKILL_DIR={skill_dir}")

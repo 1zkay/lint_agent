@@ -16,9 +16,7 @@
 
 import argparse
 import json
-import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +25,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple, Union
+
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from eda.yosys import build_yosys_env, find_yosys
 
 Bit = Union[int, str]
 CONST_BITS = {"0", "1"}
@@ -155,7 +159,11 @@ class ConstantTracer:
             design_inputs = [design_inputs]
         self.design_inputs = [str(Path(item).resolve()) for item in design_inputs]
         self.top_module = top_module
-        self.yosys_bin = self._find_yosys(yosys_bin)
+        self.yosys = find_yosys(
+            explicit_bin=yosys_bin,
+            start_points=[Path.cwd(), *(Path(item) for item in self.design_inputs)],
+        )
+        self.yosys_bin = str(self.yosys.bin)
         self.design_files = self._collect_design_files()
         self.design_catalog = self._build_design_catalog()
         self.selected_files = list(self.design_files)
@@ -186,36 +194,6 @@ class ConstantTracer:
         self.noopt_reason_map: Dict[Tuple[str, str], str] = {}
         self.conflicts: List[str] = []
         self.yosys_stat: str = ""
-
-    # ------------------------------------------------------------------
-    # 基础准备
-    # ------------------------------------------------------------------
-    def _find_yosys(self, explicit: Optional[str]) -> str:
-        if explicit:
-            return explicit
-
-        env_override = os.environ.get("YOSYS_BIN")
-        if env_override:
-            return env_override
-
-        env_yosys = shutil.which("yosys")
-        if env_yosys:
-            return env_yosys
-
-        verilog_path = Path(self.design_inputs[0]).resolve()
-        candidates = []
-        for parent in [verilog_path.parent, *verilog_path.parents]:
-            candidates.append(parent / "oss-cad-suite" / "bin" / "yosys.exe")
-            candidates.append(parent / "oss-cad-suite" / "bin" / "yosys")
-
-        for candidate in candidates:
-            if candidate.exists():
-                return str(candidate)
-
-        raise FileNotFoundError(
-            "未找到 yosys。请使用 --yosys 指定路径，或设置环境变量 YOSYS_BIN，"
-            "也可以将 yosys 加入 PATH，或在工程附近放置 oss-cad-suite。"
-        )
 
     def _collect_design_files(self) -> List[Path]:
         files: List[Path] = []
@@ -389,13 +367,7 @@ class ConstantTracer:
         return labels.get(source_type, source_type)
 
     def _run_yosys(self, script: str, timeout: int = 60) -> subprocess.CompletedProcess:
-        env = dict(os.environ)
-        yosys_path = Path(self.yosys_bin).resolve()
-        if yosys_path.parent.name.lower() == "bin":
-            suite_root = yosys_path.parent.parent
-            extra_paths = [str(yosys_path.parent), str(suite_root / "lib")]
-            env["PATH"] = os.pathsep.join(extra_paths + [env.get("PATH", "")])
-            env.setdefault("YOSYSHQ_ROOT", str(suite_root))
+        env = build_yosys_env(self.yosys)
 
         result = subprocess.run(
             [self.yosys_bin, "-p", script],
@@ -2172,7 +2144,7 @@ def main() -> int:
     parser.add_argument(
         "--yosys",
         default=None,
-        help="Yosys 可执行文件路径。不指定时会从 PATH 或附近的 oss-cad-suite 中自动查找。",
+        help="Yosys 可执行文件路径。不指定时优先使用 .env 中的 YOSYS_BIN/YOSYS_SEARCH_ROOT。",
     )
 
     args = parser.parse_args()

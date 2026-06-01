@@ -93,7 +93,7 @@ def main() -> int:
     parser.add_argument(
         "--yosys",
         default=None,
-        help="optional Yosys executable path forwarded to the detector",
+        help="optional Yosys executable path; detector otherwise uses .env YOSYS_BIN/YOSYS_SEARCH_ROOT",
     )
     args = parser.parse_args()
 

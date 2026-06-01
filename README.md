@@ -78,7 +78,7 @@ Required only for EDA diagnosis workflows:
 
 - Windows, when the configured lint tool is invoked through a Windows executable.
 - A supported lint tool installed and licensed.
-- OSS CAD Suite / Yosys available and configured through `OSS_CAD_SUITE_ROOT`.
+- Yosys available and configured through `YOSYS_BIN` or `YOSYS_SEARCH_ROOT`.
 
 Optional components:
 
@@ -420,7 +420,7 @@ If lint tool analysis fails, check:
 
 If Yosys analysis fails, check:
 
-- `OSS_CAD_SUITE_ROOT`.
+- `YOSYS_BIN` points to the Yosys executable, or `YOSYS_SEARCH_ROOT` points to the install/search directory.
 - The Verilog/SystemVerilog files can be parsed by Yosys.
 - Include directories and macro definitions are available.
 

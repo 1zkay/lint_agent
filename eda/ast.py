@@ -26,19 +26,13 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-DEFAULT_OSS_ROOT = Path(
-    os.getenv("OSS_CAD_SUITE_ROOT", Path(__file__).resolve().parents[1] / "oss-cad-suite")
-).resolve()
-YOSYS_BIN_CANDIDATES = ("yosys.exe", "yosys")
-
-
-def warn_missing_yosys(oss_root: Path) -> None:
-    """Warn if the configured OSS CAD Suite/Yosys path looks missing."""
-    yosys_bin = next((oss_root / "bin" / name for name in YOSYS_BIN_CANDIDATES if (oss_root / "bin" / name).exists()), None)
-    if not oss_root.exists():
-        print(f"[WARN] OSS CAD Suite root not found: {oss_root}", file=sys.stderr)
-    elif yosys_bin is None:
-        print(f"[WARN] Yosys binary not found under {oss_root / 'bin'}", file=sys.stderr)
+try:
+    from eda.yosys import build_yosys_env, find_yosys, warn_missing_yosys
+except ImportError:  # pragma: no cover - supports direct script execution.
+    project_root = Path(__file__).resolve().parents[1]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from eda.yosys import build_yosys_env, find_yosys, warn_missing_yosys
 
 
 def collect_verilog_files(dir_path: str, recursive: bool = True) -> List[str]:
@@ -81,39 +75,6 @@ def infer_incdirs(target_path: str, user_incdirs: List[str]) -> List[str]:
             uniq.append(d)
             seen.add(d)
     return uniq
-
-
-def build_yosys_env(oss_root: Path) -> Dict[str, str]:
-    """Construct an environment similar to oss-cad-suite/environment.ps1."""
-    env = os.environ.copy()
-    root_str = str(oss_root)
-    if not root_str.endswith(os.sep):
-        root_str += os.sep
-    env["YOSYSHQ_ROOT"] = root_str
-    env["PATH"] = f"{oss_root / 'bin'};{oss_root / 'lib'};{env.get('PATH', '')}"
-    env.setdefault("SSL_CERT_FILE", str(oss_root / "etc" / "cacert.pem"))
-    env.setdefault("PYTHON_EXECUTABLE", str(oss_root / "lib" / "python3.exe"))
-    env.setdefault("QT_PLUGIN_PATH", str(oss_root / "lib" / "qt5" / "plugins"))
-    env.setdefault("QT_LOGGING_RULES", "*=false")
-    env.setdefault("GTK_EXE_PREFIX", root_str)
-    env.setdefault("GTK_DATA_PREFIX", root_str)
-    env.setdefault(
-        "GDK_PIXBUF_MODULEDIR",
-        str(oss_root / "lib" / "gdk-pixbuf-2.0" / "2.10.0" / "loaders"),
-    )
-    env.setdefault(
-        "GDK_PIXBUF_MODULE_FILE",
-        str(oss_root / "lib" / "gdk-pixbuf-2.0" / "2.10.0" / "loaders.cache"),
-    )
-    return env
-
-
-def _find_yosys_bin(oss_root: Path) -> Optional[Path]:
-    for name in YOSYS_BIN_CANDIDATES:
-        candidate = oss_root / "bin" / name
-        if candidate.exists():
-            return candidate
-    return None
 
 
 def _quote_for_yosys(path: str) -> str:
@@ -184,7 +145,7 @@ def run_yosys_for_ast(
     files: List[str],
     incdirs: List[str],
     defines: List[str],
-    oss_root: Optional[Path] = None,
+    yosys_search_root: Optional[Path] = None,
     simplified: bool = False,
     base_root: Optional[Path] = None,
 ) -> Tuple[str, str]:
@@ -192,10 +153,8 @@ def run_yosys_for_ast(
     if not files:
         raise ValueError("No input files provided for AST generation.")
 
-    root = oss_root.resolve() if oss_root else DEFAULT_OSS_ROOT
-    yosys_bin = _find_yosys_bin(root)
-    if yosys_bin is None:
-        raise FileNotFoundError(f"Yosys binary not found under {root / 'bin'}")
+    yosys = find_yosys(yosys_search_root.resolve() if yosys_search_root else None)
+    yosys_bin = yosys.bin
 
     flags = ["-sv", "-no_dump_ptr"]
     flags.append("-dump_ast2" if simplified else "-dump_ast1")
@@ -204,7 +163,7 @@ def run_yosys_for_ast(
     flags += [_quote_for_yosys(f) for f in files]
 
     script = "read_verilog " + " ".join(flags)
-    env = build_yosys_env(root)
+    env = build_yosys_env(yosys)
     proc = subprocess.run(
         [str(yosys_bin), "-p", script],
         capture_output=True,
@@ -233,7 +192,7 @@ def run_yosys_for_netlist(
     defines: List[str],
     verilog_out: Optional[str],
     json_out: Optional[str],
-    oss_root: Optional[Path] = None,
+    yosys_search_root: Optional[Path] = None,
     top: Optional[str] = None,
 ) -> str:
     """Run Yosys synth and export netlists with write_verilog/write_json."""
@@ -242,10 +201,8 @@ def run_yosys_for_netlist(
     if not verilog_out and not json_out:
         raise ValueError("At least one netlist output (verilog/json) must be specified.")
 
-    root = oss_root.resolve() if oss_root else DEFAULT_OSS_ROOT
-    yosys_bin = _find_yosys_bin(root)
-    if yosys_bin is None:
-        raise FileNotFoundError(f"Yosys binary not found under {root / 'bin'}")
+    yosys = find_yosys(yosys_search_root.resolve() if yosys_search_root else None)
+    yosys_bin = yosys.bin
 
     if verilog_out:
         Path(verilog_out).resolve().parent.mkdir(parents=True, exist_ok=True)
@@ -268,7 +225,7 @@ def run_yosys_for_netlist(
         script_parts.append(f"write_json {_quote_for_yosys(json_out)}")
 
     script = "; ".join(script_parts)
-    env = build_yosys_env(root)
+    env = build_yosys_env(yosys)
     proc = subprocess.run(
         [str(yosys_bin), "-p", script],
         capture_output=True,
@@ -294,7 +251,7 @@ def run_yosys_for_rtlil_processes(
     incdirs: List[str],
     defines: List[str],
     rtlil_out: str,
-    oss_root: Optional[Path] = None,
+    yosys_search_root: Optional[Path] = None,
     top: Optional[str] = None,
 ) -> str:
     """Run Yosys and export RTLIL before proc pass (processes preserved for CFG/DDG analysis)."""
@@ -303,10 +260,8 @@ def run_yosys_for_rtlil_processes(
     if not rtlil_out:
         raise ValueError("Output path is required for RTLIL generation.")
 
-    root = oss_root.resolve() if oss_root else DEFAULT_OSS_ROOT
-    yosys_bin = _find_yosys_bin(root)
-    if yosys_bin is None:
-        raise FileNotFoundError(f"Yosys binary not found under {root / 'bin'}")
+    yosys = find_yosys(yosys_search_root.resolve() if yosys_search_root else None)
+    yosys_bin = yosys.bin
 
     Path(rtlil_out).resolve().parent.mkdir(parents=True, exist_ok=True)
 
@@ -322,7 +277,7 @@ def run_yosys_for_rtlil_processes(
     script_parts.append(f"write_rtlil {_quote_for_yosys(rtlil_out)}")
 
     script = "; ".join(script_parts)
-    env = build_yosys_env(root)
+    env = build_yosys_env(yosys)
     proc = subprocess.run(
         [str(yosys_bin), "-p", script],
         capture_output=True,
@@ -345,7 +300,7 @@ def run_yosys_for_rtlil_processes(
 def run_yosys_for_dfg_from_rtlil_text(
     rtlil_text: str,
     dfg_dot_out: str,
-    oss_root: Optional[Path] = None,
+    yosys_search_root: Optional[Path] = None,
     top: Optional[str] = None,
     effort: Optional[int] = None,
 ) -> str:
@@ -355,10 +310,8 @@ def run_yosys_for_dfg_from_rtlil_text(
     if not dfg_dot_out:
         raise ValueError("Output path is required for DFG generation.")
 
-    root = oss_root.resolve() if oss_root else DEFAULT_OSS_ROOT
-    yosys_bin = _find_yosys_bin(root)
-    if yosys_bin is None:
-        raise FileNotFoundError(f"Yosys binary not found under {root / 'bin'}")
+    yosys = find_yosys(yosys_search_root.resolve() if yosys_search_root else None)
+    yosys_bin = yosys.bin
 
     out_path = Path(dfg_dot_out).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -379,7 +332,7 @@ def run_yosys_for_dfg_from_rtlil_text(
         script_parts.append(viz_cmd)
 
         script = "; ".join(script_parts)
-        env = build_yosys_env(root)
+        env = build_yosys_env(yosys)
         proc = subprocess.run(
             [str(yosys_bin), "-p", script],
             capture_output=True,
@@ -762,7 +715,7 @@ def _build_cfg_ddg_for_process(proc: Dict[str, Any]) -> Dict[str, Any]:
 def build_cfg_ddg_from_rtlil_processes(
     rtlil_text: str,
     dfg_dot_out: Optional[str] = None,
-    oss_root: Optional[Path] = None,
+    yosys_search_root: Optional[Path] = None,
     top: Optional[str] = None,
     dfg_effort: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -783,7 +736,7 @@ def build_cfg_ddg_from_rtlil_processes(
         dfg_dot = run_yosys_for_dfg_from_rtlil_text(
             rtlil_text,
             dfg_dot_out,
-            oss_root=oss_root,
+            yosys_search_root=yosys_search_root,
             top=top,
             effort=dfg_effort,
         )
@@ -1034,7 +987,7 @@ def parse_target(
     incdirs: List[str],
     defines: List[str],
     recursive: bool = True,
-    oss_root: Optional[Path] = None,
+    yosys_search_root: Optional[Path] = None,
     simplified: bool = False,
 ) -> Tuple[Any, Dict[str, Any], List[str]]:
     """
@@ -1062,7 +1015,7 @@ def parse_target(
             temp_files,
             incdirs=temp_incdirs,
             defines=defines,
-            oss_root=oss_root,
+            yosys_search_root=yosys_search_root,
             simplified=simplified,
             base_root=base_root,
         )
@@ -1091,7 +1044,7 @@ def main() -> None:
             pass
 
     ap = argparse.ArgumentParser(
-        description="Get Verilog/SystemVerilog AST using oss-cad-suite Yosys (input can be a file or a directory)."
+        description="Get Verilog/SystemVerilog AST using Yosys (input can be a file or a directory)."
     )
     ap.add_argument(
         "path",
@@ -1137,9 +1090,9 @@ def main() -> None:
         help="Print the final file list used for parsing to stderr",
     )
     ap.add_argument(
-        "--oss-root",
+        "--yosys-search-root",
         default=None,
-        help="Path to oss-cad-suite root (default: ../oss-cad-suite relative to this script)",
+        help="Directory to search for Yosys (overrides YOSYS_BIN/YOSYS_SEARCH_ROOT from .env)",
     )
     ap.add_argument(
         "--simplified",
@@ -1163,8 +1116,8 @@ def main() -> None:
     )
 
     args = ap.parse_args()
-    oss_root = Path(args.oss_root).resolve() if args.oss_root else DEFAULT_OSS_ROOT
-    warn_missing_yosys(oss_root)
+    yosys_search_root = Path(args.yosys_search_root).resolve() if args.yosys_search_root else None
+    warn_missing_yosys(yosys_search_root)
 
     incdirs = infer_incdirs(args.path, args.incdir)
     defines = args.define[:]  # already like ["FOO", "WIDTH=32"]
@@ -1175,7 +1128,7 @@ def main() -> None:
             incdirs=incdirs,
             defines=defines,
             recursive=(not args.no_recursive),
-            oss_root=oss_root,
+            yosys_search_root=yosys_search_root,
             simplified=args.simplified,
         )
     except Exception as e:
@@ -1216,7 +1169,7 @@ def main() -> None:
                 defines=defines,
                 verilog_out=args.netlist_verilog,
                 json_out=args.netlist_json,
-                oss_root=oss_root,
+                yosys_search_root=yosys_search_root,
                 top=args.top,
             )
         except Exception as e:

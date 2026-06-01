@@ -30,7 +30,7 @@ def register_structure_tools(mcp) -> None:
         output_dir: Optional[str] = None,
         simplified_ast: bool = True,
         top: Optional[str] = None,
-        oss_root: Optional[str] = None,
+        yosys_search_root: Optional[str] = None,
         dfg_effort: Optional[int] = 0,
     ) -> dict:
         """使用 Yosys 分析 Verilog/SystemVerilog 结构，生成 AST 和/或 CFG/DDG/DFG。"""
@@ -51,7 +51,7 @@ def register_structure_tools(mcp) -> None:
 
         out_dir = resolve_workspace_path(output_dir) if output_dir else get_project_report_dir(project_name)
         out_dir.mkdir(parents=True, exist_ok=True)
-        resolved_oss = Path(oss_root).resolve() if oss_root else None
+        resolved_yosys_search_root = Path(yosys_search_root).resolve() if yosys_search_root else None
         results: dict = {"status": "success", "project": project_name, "files_processed": len(v_files)}
 
         if analysis_type in ("ast", "all") and parse_target:
@@ -59,7 +59,7 @@ def register_structure_tools(mcp) -> None:
             try:
                 ast_tree, meta, _ = parse_target(
                     input_path, incdirs=incdirs, defines=[], recursive=True,
-                    oss_root=resolved_oss, simplified=simplified_ast,
+                    yosys_search_root=resolved_yosys_search_root, simplified=simplified_ast,
                 )
                 ast_dict = node_to_dict(ast_tree, include_coord=False)
                 if isinstance(ast_dict, dict) and isinstance(ast_dict.get("source_files"), list):
@@ -85,11 +85,11 @@ def register_structure_tools(mcp) -> None:
                 )
                 run_yosys_for_rtlil_processes(
                     temp_files, incdirs=temp_incdirs, defines=[],
-                    rtlil_out=rtlil_output, oss_root=resolved_oss, top=top,
+                    rtlil_out=rtlil_output, yosys_search_root=resolved_yosys_search_root, top=top,
                 )
                 rtlil_text = Path(rtlil_output).read_text(encoding="utf-8", errors="replace")
                 graphs = build_cfg_ddg_from_rtlil_processes(
-                    rtlil_text, dfg_dot_out=dfg_output, oss_root=resolved_oss,
+                    rtlil_text, dfg_dot_out=dfg_output, yosys_search_root=resolved_yosys_search_root,
                     top=top, dfg_effort=dfg_effort,
                 )
                 graphs["source_files"] = [

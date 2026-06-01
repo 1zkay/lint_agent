@@ -177,6 +177,11 @@ class Config:
         self.alint_exe = os.getenv("ALINT_EXE", r"D:\software\ALINT-PRO\bin\alintcon.exe")
         self.csv_output_dir = os.getenv("CSV_OUTPUT_DIR", str(app_dir / "reports"))
 
+        # Yosys. YOSYS_BIN is an exact executable path; YOSYS_SEARCH_ROOT is a
+        # directory searched for common layouts such as bin/yosys and oss-cad-suite/bin/yosys.
+        self.yosys_bin = os.getenv("YOSYS_BIN", "").strip()
+        self.yosys_search_root = os.getenv("YOSYS_SEARCH_ROOT", "").strip()
+
         # Agentic RAG (built-in reference PDFs)
         self.rag_enabled = self._bool_env("RAG_ENABLED", "true")
         self.rag_pdf_paths = self._collect_rag_pdf_paths(
