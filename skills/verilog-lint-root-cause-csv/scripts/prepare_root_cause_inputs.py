@@ -38,6 +38,8 @@ SOURCE_LOC_RE = re.compile(
     r"(?P<path>(?:[A-Za-z]:)?[^,\t\r\n]*?\.(?:svh|sv|vh|v))\((?P<line>\d+)\)",
     re.IGNORECASE,
 )
+VIOLATION_ID_PREFIX = "vio_"
+VIOLATION_ID_WIDTH = 3
 
 
 def _project_root() -> Path:
@@ -138,6 +140,10 @@ def _parse_int(value: Any) -> int | None:
     return number if number > 0 else None
 
 
+def _format_violation_id(row_number: int) -> str:
+    return f"{VIOLATION_ID_PREFIX}{row_number:0{VIOLATION_ID_WIDTH}d}"
+
+
 def _read_report_header(lines: list[str]) -> list[str]:
     if not lines:
         raise ValueError("Lint report is empty")
@@ -201,7 +207,7 @@ def _parse_normalized_lint_report(path: Path) -> list[dict[str, Any]]:
             if any(row.get(field_by_name[column]) is None for column in NORMALIZED_REPORT_HEADER):
                 raise ValueError(f"Line {csv_line_number}: row has missing CSV columns")
 
-            violation_id = str(row.get(field_by_name["violation_id"], "")).strip()
+            original_violation_id = str(row.get(field_by_name["violation_id"], "")).strip()
             severity = str(row.get(field_by_name["severity"], "")).strip()
             message_id = str(row.get(field_by_name["message_id"], "")).strip()
             description = str(row.get(field_by_name["description"], "")).strip()
@@ -209,7 +215,7 @@ def _parse_normalized_lint_report(path: Path) -> list[dict[str, Any]]:
             line_number = _parse_int(row.get(field_by_name["line_number"]))
             source_path = file_path
             source_line = line_number
-            if not violation_id:
+            if not original_violation_id:
                 raise ValueError(f"Line {csv_line_number}: violation_id is empty")
             if not severity:
                 raise ValueError(f"Line {csv_line_number}: severity is empty")
@@ -226,7 +232,7 @@ def _parse_normalized_lint_report(path: Path) -> list[dict[str, Any]]:
                 _build_row(
                     row_number=len(rows) + 1,
                     report_line_number=csv_line_number,
-                    violation_id=violation_id,
+                    violation_id=_format_violation_id(len(rows) + 1),
                     severity=severity,
                     message_id=message_id,
                     description=description,
@@ -284,7 +290,7 @@ def _parse_legacy_lint_report(lines: list[str]) -> list[dict[str, Any]]:
             _build_row(
                 row_number=row_number,
                 report_line_number=physical_line_number,
-                violation_id=str(row_number),
+                violation_id=_format_violation_id(row_number),
                 severity=severity,
                 message_id=message_id,
                 description=contents,
