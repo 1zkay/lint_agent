@@ -254,8 +254,28 @@ def build_yosys_env(location: YosysLocation) -> dict[str, str]:
             str(location.root / "lib" / "gdk-pixbuf-2.0" / "2.10.0" / "loaders.cache"),
         )
 
+    if os.name != "nt":
+        # OSS CAD Suite ships a shell wrapper with "#!/usr/bin/env bash".
+        # Agent shell environments can have a very small PATH, so keep the
+        # normal POSIX command locations available for env, bash, dirname, etc.
+        paths.extend(
+            path
+            for path in ("/usr/local/bin", "/usr/bin", "/bin")
+            if Path(path).exists()
+        )
+
     current_path = env.get("PATH", "")
-    env["PATH"] = os.pathsep.join([*paths, current_path] if current_path else paths)
+    if current_path:
+        paths.extend(item for item in current_path.split(os.pathsep) if item)
+
+    deduped_paths: list[str] = []
+    seen_paths: set[str] = set()
+    for path in paths:
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        deduped_paths.append(path)
+    env["PATH"] = os.pathsep.join(deduped_paths)
     return env
 
 
