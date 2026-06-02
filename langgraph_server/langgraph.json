@@ -3,6 +3,6 @@
   "graphs": {
     "lint": "./langgraph_server/agent_runtime.py:lint_agent_graph"
   },
-  "env": "../.env",
+  "env": ".env",
   "python_version": "3.12"
 }
