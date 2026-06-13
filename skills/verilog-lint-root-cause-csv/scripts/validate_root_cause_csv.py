@@ -26,21 +26,28 @@ REQUIRED_COLUMNS = [
 INTEGER_RE = re.compile(r"^\d+$")
 WHITESPACE_RE = re.compile(r"\s")
 ROOT_ID_RE = re.compile(r"^root_\d{3,}$")
-LEAF_ID_RE = re.compile(r"^vio_\d{3,}$")
+LEAF_ID_RE = re.compile(r"^(vio_\d{3,})/([^,\s;；、/]+)$")
 FALSE_POSITIVE_ROOT_ID = "误报"
 
 
-def _load_lint_items(path: Path | None) -> tuple[set[str], set[str]]:
+def _load_lint_items(path: Path | None) -> tuple[dict[str, tuple[str, str]], set[str]]:
     if path is None:
-        return set(), set()
+        return {}, set()
     items = json.loads(path.read_text(encoding="utf-8"))
-    valid_ids = {str(item.get("violation_id", "")).strip() for item in items if item.get("violation_id")}
+    lint_items = {
+        str(item.get("violation_id", "")).strip(): (
+            str(item.get("message_id", "")).strip(),
+            str(item.get("description", "")).strip(),
+        )
+        for item in items
+        if str(item.get("violation_id", "")).strip()
+    }
     source_files = {
         str(item.get("file_path", "")).strip()
         for item in items
         if str(item.get("file_path", "")).strip()
     }
-    return valid_ids, source_files
+    return lint_items, source_files
 
 
 def _positive_int(value: str) -> int | None:
@@ -52,7 +59,8 @@ def _positive_int(value: str) -> int | None:
 
 
 def validate(output_csv: Path, lint_items: Path | None) -> list[str]:
-    valid_ids, source_files = _load_lint_items(lint_items)
+    lint_items_by_id, source_files = _load_lint_items(lint_items)
+    valid_ids = set(lint_items_by_id)
     seen_leaf_ids: Counter[str] = Counter()
     id_locations: defaultdict[str, list[str]] = defaultdict(list)
     root_definitions: dict[str, tuple[str, str, str, str, str, str]] = {}
@@ -83,6 +91,7 @@ def validate(output_csv: Path, lint_items: Path | None) -> list[str]:
         parent_root_id = str(row.get("parent_root_id", "")).strip()
         leaf_id = str(row.get("leaf_violation_id", "")).strip()
         leaf_note = str(row.get("leaf_violation_note", "")).strip()
+        leaf_base_id = ""
 
         is_false_positive = root_id == FALSE_POSITIVE_ROOT_ID
 
@@ -130,16 +139,29 @@ def validate(output_csv: Path, lint_items: Path | None) -> list[str]:
         elif leaf_id == "-":
             errors.append(f"Line {index}: leaf_violation_id must be an input violation_id, not '-'")
         elif "," in leaf_id or "、" in leaf_id or ";" in leaf_id or "；" in leaf_id:
-            errors.append(f"Line {index}: leaf_violation_id must contain exactly one ID")
+            errors.append(f"Line {index}: leaf_violation_id must contain exactly one composite ID")
         elif WHITESPACE_RE.search(leaf_id):
             errors.append(f"Line {index}: leaf_violation_id contains whitespace")
-        elif not LEAF_ID_RE.match(leaf_id):
-            errors.append(
-                f"Line {index}: leaf_violation_id must match vio_<three-or-more digits>, got {leaf_id}"
-            )
-        elif valid_ids and leaf_id not in valid_ids:
-            errors.append(f"Line {index}: unknown leaf_violation_id {leaf_id}")
-
+        else:
+            leaf_match = LEAF_ID_RE.match(leaf_id)
+            if not leaf_match:
+                errors.append(
+                    f"Line {index}: leaf_violation_id must match vio_<three-or-more digits>/<message_id>, got {leaf_id}"
+                )
+            else:
+                leaf_base_id, leaf_message_id = leaf_match.groups()
+                if valid_ids and leaf_base_id not in valid_ids:
+                    errors.append(f"Line {index}: unknown leaf violation_id {leaf_base_id}")
+                elif lint_items_by_id:
+                    expected_message_id, expected_description = lint_items_by_id[leaf_base_id]
+                    if leaf_message_id != expected_message_id:
+                        errors.append(
+                            f"Line {index}: leaf_violation_id message_id must be {expected_message_id}, got {leaf_message_id}"
+                        )
+                    if leaf_note != expected_description:
+                        errors.append(
+                            f"Line {index}: leaf_violation_note must exactly match the normalized lint description"
+                        )
         if not leaf_note:
             errors.append(f"Line {index}: leaf_violation_note is empty")
 
@@ -150,12 +172,10 @@ def validate(output_csv: Path, lint_items: Path | None) -> list[str]:
                 errors.append(f"Line {index}: false-positive fix_suggestion must be /")
             if parent_root_id != "/":
                 errors.append(f"Line {index}: false-positive parent_root_id must be /")
-            if leaf_note != "/":
-                errors.append(f"Line {index}: false-positive leaf_violation_note must be /")
 
-        if leaf_id:
-            seen_leaf_ids[leaf_id] += 1
-            id_locations[leaf_id].append(f"Line {index}")
+        if leaf_base_id:
+            seen_leaf_ids[leaf_base_id] += 1
+            id_locations[leaf_base_id].append(f"Line {index}")
 
         if root_id and not is_false_positive:
             root_definition = (
