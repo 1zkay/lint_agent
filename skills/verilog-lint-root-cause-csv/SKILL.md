@@ -67,9 +67,9 @@ Rules:
 - `root_file_start`: 1-based inclusive start line of the root-cause range.
 - `root_file_end`: 1-based inclusive end line of the root-cause range. For a single-line cause, make it equal to `root_file_start`.
 - `parent_root_id`: `/` for a top-level root cause, another `root_id` when this row's root is derived from that parent root, or `/` for a confirmed false positive.
-- `leaf_violation_id`: one composite leaf identifier formed as `<normalized violation_id>/<message_id>`, such as `vio_001/LatchIsInferred`. Copy `message_id` exactly from `normalized_lint_report.csv`.
-- `leaf_violation_note`: copy the corresponding `description` value exactly from `normalized_lint_report.csv`. Do not summarize, translate, or replace it with a fix note.
-- If a copied `description` contains commas, quotes, or newlines, preserve it as one `leaf_violation_note` cell using standard CSV quoting and escaping. Do not split, rewrite, or drop characters to avoid quoting.
+- `leaf_violation_id`: one normalized input `violation_id`, such as `vio_001`.
+- `leaf_violation_note`: write the corresponding `message_id:description` from `normalized_lint_report.csv`, such as `LatchIsInferred:Latch is inferred for signal 'o1'`. Copy both `message_id` and `description` exactly, joined by one literal colon. Do not summarize, translate, or replace it with a fix note.
+- If a copied `description` contains commas, quotes, or newlines, preserve the whole `message_id:description` value as one `leaf_violation_note` cell using standard CSV quoting and escaping. Do not split, rewrite, or drop characters to avoid quoting.
 - Write one output row per input lint violation. If several violations share the same root cause, repeat the same root fields and use one `leaf_violation_id` per row.
 - Do not combine multiple leaf IDs in one cell. Do not add severity, message ID, prose analysis columns, grouped-ID columns, or any extra columns.
 - Keep every repeated `root_id` internally consistent: the same `root_note`, `fix_suggestion`, source range, and `parent_root_id` must be used on each row for that root.
@@ -81,10 +81,10 @@ For example:
 
 ```text
 root_id,root_note,fix_suggestion,root_file_path,root_file_start,root_file_end,parent_root_id,leaf_violation_id,leaf_violation_note
-root_001,mem数组被读取但没有任何写入或初始化,为mem添加明确的写入逻辑或初始化,temp.v,6,6,/,vio_008/VarReadBeforeSet,The variable 'mem' is read before it is set
-root_002,case分支没有在所有路径上为每个输出赋值,在case前设置默认值或在每个分支中完整赋值,temp.v,10,14,/,vio_013/LatchIsInferred,Latch is inferred for signal 'o1'
-root_003,由root_002推断锁存器后派生出的gated clock告警,先修复root_002；该派生告警应随锁存器消除而消失,temp.v,10,14,root_002,vio_021/LatchGatedClock,The latch inferred for 'o1' is used as a gated clock
-误报,该unloaded net是同一时序更新内部使用的临时信号，不构成功能问题,/,temp.v,18,18,/,vio_022/DrivenNetUnloaded,The driven net 'tmp' is unloaded in the design
+root_001,mem数组被读取但没有任何写入或初始化,为mem添加明确的写入逻辑或初始化,temp.v,6,6,/,vio_008,VarReadBeforeSet:The variable 'mem' is read before it is set
+root_002,case分支没有在所有路径上为每个输出赋值,在case前设置默认值或在每个分支中完整赋值,temp.v,10,14,/,vio_013,LatchIsInferred:Latch is inferred for signal 'o1'
+root_003,由root_002推断锁存器后派生出的gated clock告警,先修复root_002；该派生告警应随锁存器消除而消失,temp.v,10,14,root_002,vio_021,LatchGatedClock:The latch inferred for 'o1' is used as a gated clock
+误报,该unloaded net是同一时序更新内部使用的临时信号，不构成功能问题,/,temp.v,18,18,/,vio_022,DrivenNetUnloaded:The driven net 'tmp' is unloaded in the design
 ```
 
 ## Workflow
@@ -129,7 +129,7 @@ Read the printed `WORK_DIR`, `NORMALIZED_LINT_REPORT_CSV`, `LINT_ITEMS_CSV`, `LI
 - Do not group rows only because their fixes look similar. Similar fixes at independent source locations are separate root-cause groups.
 - Before finalizing each repeated `root_id`, check the one-fix acceptance criterion: one source edit at the recorded root range should clear that group's leaf violations, while unrelated groups remain independent.
 - Use `parent_root_id` only for a real derived relationship. Use `/` for independent top-level roots.
-- If a lint row is a confirmed false positive, still emit one row for that leaf: set `root_id` to `误报`, put the false-positive reason in `root_note` rather than `/`, set `fix_suggestion` and `parent_root_id` to `/`, fill `leaf_violation_id` as `<normalized violation_id>/<message_id>`, and copy `description` to `leaf_violation_note`.
+- If a lint row is a confirmed false positive, still emit one row for that leaf: set `root_id` to `误报`, put the false-positive reason in `root_note` rather than `/`, set `fix_suggestion` and `parent_root_id` to `/`, fill `leaf_violation_id` with the normalized `violation_id`, and fill `leaf_violation_note` as `message_id:description`.
 - If a lint row is policy-only but not a false positive, keep a normal `root_<number>` ID and explain the policy rationale and fix or waiver suggestion in the normal fields.
 - Prefer concise, code-evidenced ranges. For example, if a case item and its assignments are the root cause, the range should cover that case statement or the offending assignment block rather than the whole file.
 
@@ -150,9 +150,8 @@ validation:
 
 - Re-read every CSV row and the corresponding lint item from `lint_items.csv`.
 - Re-open the relevant source code ranges for rows that are broad, style-only, tool-policy-only, or based on a lint message that may not be a functional defect.
-- Ensure every input `violation_id` appears exactly once as the prefix of a `leaf_violation_id` in the form `<normalized violation_id>/<message_id>`.
-- Ensure every `leaf_violation_id` uses the exact `message_id` from the corresponding normalized lint row.
-- Ensure every `leaf_violation_note` exactly matches the corresponding `description` from the normalized lint row.
+- Ensure every input `violation_id` appears exactly once as `leaf_violation_id`.
+- Ensure every `leaf_violation_note` exactly matches `message_id:description` from the corresponding normalized lint row.
 - Keep repeated normal `root_<number>` values consistent and make derived roots point to an existing parent root. Do not apply normal root consistency to `root_id=误报`.
 - Keep the CSV schema unchanged: no comments, no analysis columns, and no grouped ID cells.
 - Ensure `root_note` and `fix_suggestion` use Chinese natural-language text except for code identifiers, signal names, module names, file paths, rule/message IDs, violation IDs, and Verilog literals.

@@ -26,7 +26,7 @@ REQUIRED_COLUMNS = [
 INTEGER_RE = re.compile(r"^\d+$")
 WHITESPACE_RE = re.compile(r"\s")
 ROOT_ID_RE = re.compile(r"^root_\d{3,}$")
-LEAF_ID_RE = re.compile(r"^(vio_\d{3,})/([^,\s;；、/]+)$")
+LEAF_ID_RE = re.compile(r"^vio_\d{3,}$")
 FALSE_POSITIVE_ROOT_ID = "误报"
 
 
@@ -139,29 +139,24 @@ def validate(output_csv: Path, lint_items: Path | None) -> list[str]:
         elif leaf_id == "-":
             errors.append(f"Line {index}: leaf_violation_id must be an input violation_id, not '-'")
         elif "," in leaf_id or "、" in leaf_id or ";" in leaf_id or "；" in leaf_id:
-            errors.append(f"Line {index}: leaf_violation_id must contain exactly one composite ID")
+            errors.append(f"Line {index}: leaf_violation_id must contain exactly one ID")
         elif WHITESPACE_RE.search(leaf_id):
             errors.append(f"Line {index}: leaf_violation_id contains whitespace")
+        elif not LEAF_ID_RE.match(leaf_id):
+            errors.append(
+                f"Line {index}: leaf_violation_id must match vio_<three-or-more digits>, got {leaf_id}"
+            )
         else:
-            leaf_match = LEAF_ID_RE.match(leaf_id)
-            if not leaf_match:
-                errors.append(
-                    f"Line {index}: leaf_violation_id must match vio_<three-or-more digits>/<message_id>, got {leaf_id}"
-                )
-            else:
-                leaf_base_id, leaf_message_id = leaf_match.groups()
-                if valid_ids and leaf_base_id not in valid_ids:
-                    errors.append(f"Line {index}: unknown leaf violation_id {leaf_base_id}")
-                elif lint_items_by_id:
-                    expected_message_id, expected_description = lint_items_by_id[leaf_base_id]
-                    if leaf_message_id != expected_message_id:
-                        errors.append(
-                            f"Line {index}: leaf_violation_id message_id must be {expected_message_id}, got {leaf_message_id}"
-                        )
-                    if leaf_note != expected_description:
-                        errors.append(
-                            f"Line {index}: leaf_violation_note must exactly match the normalized lint description"
-                        )
+            leaf_base_id = leaf_id
+            if valid_ids and leaf_base_id not in valid_ids:
+                errors.append(f"Line {index}: unknown leaf_violation_id {leaf_base_id}")
+            elif lint_items_by_id:
+                expected_message_id, expected_description = lint_items_by_id[leaf_base_id]
+                expected_leaf_note = f"{expected_message_id}:{expected_description}"
+                if leaf_note != expected_leaf_note:
+                    errors.append(
+                        f"Line {index}: leaf_violation_note must exactly match message_id:description from normalized lint"
+                    )
         if not leaf_note:
             errors.append(f"Line {index}: leaf_violation_note is empty")
 

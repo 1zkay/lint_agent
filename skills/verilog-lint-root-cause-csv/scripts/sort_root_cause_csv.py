@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 ROOT_ID_RE = re.compile(r"^root_(\d+)$")
-LEAF_ID_RE = re.compile(r"^vio_(\d+)(?:/|$)")
+LEAF_ID_RE = re.compile(r"^vio_(\d+)$")
 FALSE_POSITIVE_ROOT_ID = "误报"
 
 
