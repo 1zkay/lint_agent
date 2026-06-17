@@ -7,8 +7,9 @@ ALINT-PRO Chainlit 聊天应用（MCP Client + create_agent 版）
 官方 API 对照：
   图构造 : create_agent(llm, tools, system_prompt=..., checkpointer=...)
           来源: https://docs.langchain.com/oss/python/langchain/agents
-  流式   : agent.astream(stream_mode=["messages", "updates"], version="v2")
-          来源: https://docs.langchain.com/oss/python/langchain/streaming
+  流式   : agent.astream_events(..., version="v3")
+          -> run.messages/run.tool_calls/run.updates
+          来源: https://docs.langchain.com/oss/python/langchain/event-streaming
   Step   : step.input = ... / step.output = ... （官方字段）
           来源: https://docs.chainlit.io/api-reference/step-class
   审批   : HumanInTheLoopMiddleware + Command(resume=...)
@@ -30,9 +31,8 @@ import hmac
 import logging
 import os
 import sys
-from contextlib import aclosing
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 # Windows + psycopg async 兼容：需使用 SelectorEventLoopPolicy
 if os.name == "nt":
@@ -54,16 +54,8 @@ from agent_runtime.configuration import (
     find_llm_preset_by_id as _find_llm_preset_by_id,
     resolve_llm_preset_id as _resolve_llm_preset_id,
 )
-from langchain_core.messages import (
-    AIMessageChunk,
-    HumanMessage,
-)
-from langgraph.types import (
-    Command,
-    MessagesStreamPart,
-    StreamPart,
-    UpdatesStreamPart,
-)
+from langgraph.stream import UpdatesTransformer
+from langgraph.types import Command
 from chainlit.types import ThreadDict
 
 from app.chainlit_data import register_chainlit_data_layer
@@ -89,6 +81,11 @@ from app.chainlit_runtime import (
     initialize_chat_runtime as _initialize_chat_runtime,
     resolve_agent_context as _resolve_agent_context,
     stop_runtime_owner as _stop_runtime_owner,
+)
+from agent_runtime.message_types import (
+    HumanMessage,
+    message_text as _message_text,
+    message_tool_calls as _message_tool_calls,
 )
 from compat.langgraph import apply_recursive_send_sanitization
 from config import config
@@ -194,11 +191,12 @@ async def on_message(message: cl.Message):
     """
     接收用户消息，统一走 create_agent 主链路（官方短期记忆主入口）。
 
-    流式处理采用官方推荐的 stream_mode=["messages", "updates"] API：
-      messages 模式：LLM 输出 token（AIMessageChunk），含文本和工具调用块
-      updates 模式：完整状态更新，含 model 节点和 tools 节点的输出消息
+    流式处理采用官方推荐的 v3 event streaming API：
+      run.messages：LLM 输出 token
+      run.tool_calls：工具调用生命周期
+      run.updates ：完整状态更新，含 model 节点和 tools 节点的输出消息
 
-    官方参考：https://docs.langchain.com/oss/python/langchain/streaming
+    官方参考：https://docs.langchain.com/oss/python/langchain/event-streaming
 
     cl.Step 用法遵循官方：
       step.input  = ...  设置工具参数展示（show_input=True 时可见）
@@ -206,7 +204,7 @@ async def on_message(message: cl.Message):
       官方参考：https://docs.chainlit.io/api-reference/step-class
 
     记忆语义：
-    - 本函数经 agent.astream 执行，状态更新自动落入 checkpointer。
+    - 本函数经 agent.astream_events 执行，状态更新自动落入 checkpointer。
     """
     agent = cl.user_session.get("agent")
     if not agent:
@@ -239,177 +237,171 @@ async def on_message(message: cl.Message):
         "recursion_limit": config.agent_recursion_limit,
     }
 
-    # ── 流式处理（对照官方标准实现）────────────────────────────────────────
-    # 官方标准参考：https://docs.langchain.com/oss/python/langchain/streaming
-    #
-    # 官方 v2 循环结构（精简版）：
-    #   async with aclosing(agent.astream(..., stream_mode=["messages","updates"], version="v2")) as stream:
-    #       async for part in stream:
-    #           mode = part["type"]
-    #           data = part["data"]
-    #           if mode == "messages":
-    #               token, metadata = data
-    #           elif mode == "updates":
-    #               for source, update in data.items():
-    #                   ...
-    #
-    # messages 模式仅产出 LLM 的逐 token 输出（AIMessageChunk），ToolMessage 仅在 updates 模式中出现。
+    # ── 流式处理（v3 typed projections）────────────────────────────────────
+    # 官方标准参考：https://docs.langchain.com/oss/python/langchain/event-streaming
+    # run.messages 负责 token；create_agent 内置 ToolCallTransformer 提供 run.tool_calls。
+    # UpdatesTransformer 显式开启 run.updates，用于同步 todos 和最终回答状态。
     # ─────────────────────────────────────────────────────────────────────────
     response_msg = cl.Message(content="")
     await response_msg.send()
 
     llm_step_by_node: dict[str, cl.Step] = {}
     llm_output_by_node: dict[str, str] = {}
-    # {tc_id: cl.Step} — 统一追踪当前未完成的工具 Step。
-    # messages 模式负责尽早创建 Step，updates 模式负责补齐 input 和关闭 output。
-    tool_step_by_id: dict = {}
     _model_text_buffer: str = ""       # 当前轮缓冲，确认无真实工具调用后写入 response_msg
     _write_todos_text_fallback: str = ""  # write_todos 同轮文字，用于后续空终止轮兜底
+
+    async def _ensure_llm_step(node_name: str) -> cl.Step:
+        llm_step = llm_step_by_node.get(node_name)
+        if llm_step is not None:
+            return llm_step
+        llm_step = cl.Step(name=_step_name("llm", node_name), type="llm")
+        await llm_step.send()
+        llm_step_by_node[node_name] = llm_step
+        llm_output_by_node[node_name] = ""
+        return llm_step
+
+    async def _consume_v3_message_stream(message_stream: Any) -> None:
+        nonlocal _model_text_buffer
+
+        node_name = str(getattr(message_stream, "node", None) or "model")
+        llm_step = await _ensure_llm_step(node_name)
+
+        async def _consume_text() -> None:
+            nonlocal _model_text_buffer
+
+            async for token_text in message_stream.text:
+                token_text = str(token_text or "")
+                if not token_text:
+                    continue
+                await llm_step.stream_token(token_text)
+                llm_output_by_node[node_name] += token_text
+                if node_name == "model":
+                    _model_text_buffer += token_text
+
+        await _consume_text()
+
+    async def _consume_v3_messages(run: Any) -> None:
+        async for message_stream in run.messages:
+            await _consume_v3_message_stream(message_stream)
+
+    async def _consume_v3_tool_call(tool_call_stream: Any) -> None:
+        tool_name = str(getattr(tool_call_stream, "tool_name", "") or "tool")
+        tool_input = getattr(tool_call_stream, "input", {}) or {}
+
+        step = cl.Step(name=_step_name("tool", tool_name), type="tool", show_input=True)
+        step.input = str(tool_input)[:600]
+        step_sent = False
+
+        try:
+            await step.send()
+            step_sent = True
+
+            async for _delta in tool_call_stream:
+                pass
+
+            error = str(getattr(tool_call_stream, "error", "") or "")
+            if error:
+                step.output = f"Error: {error}"[:800]
+            else:
+                output = getattr(tool_call_stream, "output", "")
+                output_text = _message_text(output) or (str(output) if output is not None else "")
+                step.output = output_text[:800]
+        finally:
+            if step_sent:
+                try:
+                    await step.update()
+                except Exception:
+                    pass
+
+    async def _consume_v3_tool_calls(run: Any) -> None:
+        tool_tasks: list[asyncio.Task[None]] = []
+        async for tool_call_stream in run.tool_calls:
+            tool_tasks.append(asyncio.create_task(_consume_v3_tool_call(tool_call_stream)))
+        if tool_tasks:
+            await asyncio.gather(*tool_tasks)
+
+    async def _process_v3_update_data(data: Any) -> None:
+        nonlocal _model_text_buffer, _write_todos_text_fallback
+
+        if not isinstance(data, dict):
+            return
+
+        for source, update in data.items():
+            if not isinstance(update, dict):
+                continue
+
+            todos_update = update.get("todos")
+            if todos_update is not None:
+                await _sync_todos_to_tasklist(todos_update)
+
+            msgs = update.get("messages")
+            last_msg = msgs[-1] if msgs else None
+
+            llm_step = llm_step_by_node.pop(source, None)
+            if llm_step:
+                llm_output = llm_output_by_node.pop(source, "")
+                summary = llm_output
+                if last_msg is not None and not summary:
+                    summary = _message_preview(last_msg) or _tool_call_summary(
+                        _message_tool_calls(last_msg)
+                    )
+                if summary and not llm_output:
+                    llm_step.output = summary
+                await llm_step.update()
+                if source not in {"model", "tools"}:
+                    continue
+
+            if source == "model":
+                if not last_msg:
+                    continue
+
+                tool_calls = _message_tool_calls(last_msg)
+                if tool_calls:
+                    # write_todos 是 UI 元工具：同轮文字暂存为兜底，供后续空终止轮使用。
+                    # 有其他真实工具调用时丢弃缓冲（中间思考不展示给用户）。
+                    if all(str(tc.get("name") or "") == "write_todos" for tc in tool_calls):
+                        _write_todos_text_fallback = _model_text_buffer
+                    _model_text_buffer = ""
+                else:
+                    # 本轮无工具调用（最终回答轮）：写入缓冲文字；
+                    # 若模型输出为空（write_todos 同轮已输出回复），用 fallback 兜底。
+                    final_text = _model_text_buffer or _write_todos_text_fallback
+                    if final_text:
+                        response_msg.content = final_text
+                        await response_msg.update()
+                    _model_text_buffer = ""
+                    _write_todos_text_fallback = ""
+
+            elif _should_show_run_step(source):
+                step = cl.Step(name=_step_name("run", source), type="run")
+                step.output = _update_preview(update) or (
+                    _message_preview(last_msg) if last_msg is not None else f"Node `{source}` completed"
+                )
+                await step.send()
+                await step.update()
+
+    async def _consume_v3_updates(run: Any) -> None:
+        async for data in run.updates:
+            await _process_v3_update_data(data)
 
     try:
         pending_input = {"messages": [user_human_message]}
         while True:
             hitl_request = None
-            async with aclosing(
-                agent.astream(
-                    pending_input,
-                    config=run_config,
-                    context=agent_context,
-                    stream_mode=["messages", "updates"],
-                    version="v2",
+            async with await agent.astream_events(
+                pending_input,
+                config=run_config,
+                context=agent_context,
+                version="v3",
+                transformers=[UpdatesTransformer],
+            ) as run:
+                await asyncio.gather(
+                    _consume_v3_messages(run),
+                    _consume_v3_tool_calls(run),
+                    _consume_v3_updates(run),
                 )
-            ) as stream:
-                async for part in stream:
-                    stream_part = cast(StreamPart[Any, Any], part)
-                    stream_mode = stream_part["type"]
-
-                    # ── messages 模式：LLM 逐 token 输出 ─────────────────────────────
-                    # v2 StreamPart: {"type":"messages","data":(token, metadata), ...}
-                    if stream_mode == "messages":
-                        messages_part = cast(MessagesStreamPart, stream_part)
-                        token, metadata = messages_part["data"]
-                        if not isinstance(token, AIMessageChunk):
-                            continue
-
-                        node_name = str((metadata or {}).get("langgraph_node") or "model")
-                        llm_step = llm_step_by_node.get(node_name)
-                        if llm_step is None:
-                            llm_step = cl.Step(name=_step_name("llm", node_name), type="llm")
-                            await llm_step.send()
-                            llm_step_by_node[node_name] = llm_step
-                            llm_output_by_node[node_name] = ""
-
-                        if token.text:
-                            await llm_step.stream_token(token.text)
-                            llm_output_by_node[node_name] += token.text
-                            if node_name == "model":
-                                _model_text_buffer += token.text
-
-                        # 工具调用流 — 跟踪并创建 cl.Step
-                        # 官方输出格式：首 chunk 含 {id, name, ...}，后续参数 chunk 仅补 args。
-                        for tc_chunk in (token.tool_call_chunks or []):
-                            tc_id = tc_chunk.get("id")
-                            tc_name = tc_chunk.get("name")
-
-                            if tc_id and tc_name and tc_id not in tool_step_by_id:
-                                step = cl.Step(name=_step_name("tool", tc_name), type="tool", show_input=True)
-                                await step.send()
-                                tool_step_by_id[tc_id] = step
-
-                    # ── updates 模式：节点完成后的完整消息 ───────────────────────────
-                    # v2 StreamPart: {"type":"updates","data":{node_name:update,...}, ...}
-                    elif stream_mode == "updates":
-                        updates_part = cast(UpdatesStreamPart, stream_part)
-                        data = updates_part["data"]
-                        hitl_request = _extract_hitl_request_from_interrupts(
-                            data.get("__interrupt__") if isinstance(data, dict) else None
-                        )
-                        if hitl_request:
-                            break
-
-                        if not isinstance(data, dict):
-                            continue
-
-                        for source, update in data.items():
-                            if not isinstance(update, dict):
-                                continue
-
-                            todos_update = update.get("todos")
-                            if todos_update is not None:
-                                await _sync_todos_to_tasklist(todos_update)
-
-                            msgs = update.get("messages")
-                            last_msg = msgs[-1] if msgs else None
-
-                            llm_step = llm_step_by_node.pop(source, None)
-                            if llm_step:
-                                llm_output = llm_output_by_node.pop(source, "")
-                                summary = llm_output
-                                if last_msg is not None and not summary:
-                                    summary = _message_preview(last_msg) or _tool_call_summary(
-                                        getattr(last_msg, "tool_calls", None)
-                                    )
-                                if summary and not llm_output:
-                                    llm_step.output = summary
-                                await llm_step.update()
-                                if source not in {"model", "tools"}:
-                                    continue
-
-                            if source == "model":
-                                if not last_msg:
-                                    continue
-
-                                if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-                                    # write_todos 是 UI 元工具：同轮文字暂存为兜底，供后续空终止轮使用。
-                                    # 有其他真实工具调用时丢弃缓冲（中间思考不展示给用户）。
-                                    if all(tc.get("name") == "write_todos" for tc in last_msg.tool_calls):
-                                        _write_todos_text_fallback = _model_text_buffer
-                                    _model_text_buffer = ""
-                                    # 用完整 tool_calls 补全 Step.input（比流式 args chunks 准确）
-                                    for tc in last_msg.tool_calls:
-                                        tc_id = tc.get("id")
-                                        if not tc_id:
-                                            continue
-                                        step = tool_step_by_id.get(tc_id)
-                                        if step:
-                                            step.input = str(tc.get("args", {}))[:600]
-                                        else:
-                                            # 若 messages 模式未收到 tool_call_chunks（非流式模型）
-                                            # 在此创建 Step
-                                            step = cl.Step(
-                                                name=_step_name("tool", str(tc.get("name", "工具"))),
-                                                type="tool",
-                                                show_input=True,
-                                            )
-                                            await step.send()
-                                            step.input = str(tc.get("args", {}))[:600]
-                                            tool_step_by_id[tc_id] = step
-                                else:
-                                    # 本轮无工具调用（最终回答轮）：写入缓冲文字；
-                                    # 若模型输出为空（write_todos 同轮已输出回复），用 fallback 兜底。
-                                    final_text = _model_text_buffer or _write_todos_text_fallback
-                                    if final_text:
-                                        response_msg.content = final_text
-                                        await response_msg.update()
-                                    _model_text_buffer = ""
-                                    _write_todos_text_fallback = ""
-
-                            elif source == "tools":
-                                # ToolMessage：关闭对应 Step（遍历全部，支持并行工具调用）
-                                for tool_msg in (msgs or []):
-                                    tc_id = getattr(tool_msg, "tool_call_id", None)
-                                    step = tool_step_by_id.pop(tc_id, None)
-                                    if step:
-                                        step.output = str(tool_msg.content)[:800]
-                                        await step.update()
-
-                            elif _should_show_run_step(source):
-                                step = cl.Step(name=_step_name("run", source), type="run")
-                                step.output = _update_preview(update) or (
-                                    _message_preview(last_msg) if last_msg is not None else f"Node `{source}` completed"
-                                )
-                                await step.send()
-                                await step.update()
+                if await run.interrupted():
+                    hitl_request = _extract_hitl_request_from_interrupts(await run.interrupts())
 
             if not hitl_request:
                 break
@@ -428,15 +420,6 @@ async def on_message(message: cl.Message):
         for llm_step in llm_step_by_node.values():
             try:
                 await llm_step.update()
-            except Exception:
-                pass
-
-        # 关闭所有未完成的 Step（异常保护）
-        for step in tool_step_by_id.values():
-            if not step:
-                continue
-            try:
-                await step.update()
             except Exception:
                 pass
 

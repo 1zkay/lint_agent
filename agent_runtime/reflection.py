@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.constants import TAG_NOSTREAM
 
 from langchain.agents.middleware.types import (
@@ -21,6 +20,14 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
     ResponseT,
+)
+
+from agent_runtime.message_types import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    message_text,
+    message_tool_calls,
 )
 
 if TYPE_CHECKING:
@@ -58,7 +65,7 @@ Respond with EXACTLY one of:
 
 # TAG_NOSTREAM config — 传递给 model.ainvoke() 以抑制流式输出
 # StreamMessagesHandler.on_chat_model_start 检测到此标签后不注册 run_id，
-# 从而阻止 token 被推送到 graph.astream(stream_mode="messages") 输出。
+# 从而阻止 evaluator token 被推送到 LangGraph streaming 输出。
 _NOSTREAM_CONFIG: dict[str, Any] = {"tags": [TAG_NOSTREAM]}
 
 
@@ -95,7 +102,7 @@ class ReflectionMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, Resp
         """从消息列表中提取最近一条用户问题。"""
         for msg in reversed(request.messages):
             if isinstance(msg, HumanMessage) and msg.content:
-                return msg.text.strip()
+                return message_text(msg).strip()
         return ""
 
     async def _generate_draft(
@@ -146,7 +153,7 @@ class ReflectionMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, Resp
 
         # 注入待评估的草稿，标记为评估对象
         eval_messages.append(AIMessage(
-            content=f"[DRAFT TO EVALUATE]\n{draft.text}"
+            content=f"[DRAFT TO EVALUATE]\n{message_text(draft)}"
         ))
 
         # 评估指令
@@ -164,7 +171,7 @@ class ReflectionMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, Resp
             )
             return True, ""
 
-        verdict = eval_response.text.strip()
+        verdict = message_text(eval_response).strip()
 
         if verdict.upper().startswith("PASS"):
             return True, ""
@@ -191,10 +198,10 @@ class ReflectionMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, Resp
             if draft is None:
                 break
 
-            if draft.tool_calls:
+            if message_tool_calls(draft):
                 break
 
-            draft_text = draft.text.strip()
+            draft_text = message_text(draft).strip()
             if not draft_text:
                 break
 

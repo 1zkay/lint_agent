@@ -6,6 +6,8 @@ from typing import Any
 
 import chainlit as cl
 
+from agent_runtime.message_types import message_text
+
 TODO_STATUS_MAP = {
     "pending": cl.TaskStatus.READY,
     "in_progress": cl.TaskStatus.RUNNING,
@@ -48,21 +50,7 @@ def step_name(step_type: str, node_name: str) -> str:
 
 
 def message_preview(message: Any) -> str:
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content[:800]
-    if isinstance(content, list):
-        texts = []
-        for block in content:
-            if isinstance(block, dict):
-                text = block.get("text")
-                if isinstance(text, str) and text.strip():
-                    texts.append(text.strip())
-        if texts:
-            return "\n".join(texts)[:800]
-    if content:
-        return str(content)[:800]
-    return ""
+    return message_text(message)[:800]
 
 
 def tool_call_summary(tool_calls: Any) -> str:

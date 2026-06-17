@@ -33,11 +33,18 @@ from langchain.tools import tool
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
+from agent_runtime.message_types import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    message_text,
+    message_tool_calls,
+)
 from llm.factory import (
     build_chat_model_from_config,
     build_openrouter_default_headers,
@@ -473,17 +480,18 @@ class HardwareReferenceAgenticRAGService:
             if tool_message is None:
                 return "rewrite_question"
 
+            tool_text = message_text(tool_message)
             try:
-                payload = json.loads(str(tool_message.content))
+                payload = json.loads(tool_text)
             except Exception:
-                payload = {"results": [], "raw": str(tool_message.content)}
+                payload = {"results": [], "raw": tool_text}
 
             if not payload.get("results"):
                 if int(state.get("rewrite_count", 0) or 0) >= self.max_rewrites:
                     return "generate_answer"
                 return "rewrite_question"
 
-            question = str(state["messages"][0].content)
+            question = message_text(state["messages"][0])
             prompt = (
                 "You are a grader assessing whether retrieved hardware-reference context is relevant "
                 "to the user's question.\n"
@@ -504,7 +512,7 @@ class HardwareReferenceAgenticRAGService:
             return "rewrite_question"
 
         async def rewrite_question(state: PdfAgenticRagState):
-            question = str(state["messages"][0].content)
+            question = message_text(state["messages"][0])
             prompt = (
                 "请改写下面这个关于 Verilog/SystemVerilog 语言规则的问题，"
                 "让它更适合做语义检索。保留关键信号、语法构造、标准语义、"
@@ -515,17 +523,17 @@ class HardwareReferenceAgenticRAGService:
                 [{"role": "user", "content": prompt}]
             )
             return {
-                "messages": [HumanMessage(content=str(response.content).strip())],
+                "messages": [HumanMessage(content=message_text(response).strip())],
                 "rewrite_count": int(state.get("rewrite_count", 0) or 0) + 1,
             }
 
         async def generate_answer(state: PdfAgenticRagState):
-            question = str(state["messages"][0].content)
+            question = message_text(state["messages"][0])
             tool_message = next(
                 (msg for msg in reversed(state["messages"]) if isinstance(msg, ToolMessage)),
                 None,
             )
-            context_json = str(tool_message.content) if tool_message else '{"results":[]}'
+            context_json = message_text(tool_message) if tool_message else '{"results":[]}'
             prompt = (
                 "你是 Verilog / SystemVerilog / IEEE 语言标准参考文档问答助手。"
                 "知识库覆盖 IEEE 标准文档。"
@@ -580,18 +588,18 @@ class HardwareReferenceAgenticRAGService:
 
         final_answer = ""
         for message in reversed(messages):
-            if isinstance(message, AIMessage) and not message.tool_calls:
-                final_answer = str(message.content)
+            if isinstance(message, AIMessage) and not message_tool_calls(message):
+                final_answer = message_text(message)
                 break
         if not final_answer:
             for message in reversed(messages):
                 if isinstance(message, AIMessage):
-                    final_answer = str(message.content)
+                    final_answer = message_text(message)
                     break
 
         rewritten_question = None
         human_messages = [
-            str(message.content)
+            message_text(message)
             for message in messages
             if isinstance(message, HumanMessage)
         ]
@@ -601,10 +609,11 @@ class HardwareReferenceAgenticRAGService:
         last_tool_payload: dict[str, Any] | None = None
         for message in reversed(messages):
             if isinstance(message, ToolMessage):
+                tool_text = message_text(message)
                 try:
-                    last_tool_payload = json.loads(str(message.content))
+                    last_tool_payload = json.loads(tool_text)
                 except Exception:
-                    last_tool_payload = {"results": [], "raw": str(message.content)}
+                    last_tool_payload = {"results": [], "raw": tool_text}
                 break
 
         citations = []

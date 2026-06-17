@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def extract_hitl_request_from_interrupts(interrupts):
-    """从 LangGraph v2 Interrupt 元组中提取 HITL 中断请求。"""
+    """从 LangGraph Interrupt 序列中提取 HITL 中断请求。"""
     if not interrupts:
         return None
     first = interrupts[0]

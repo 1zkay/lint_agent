@@ -9,9 +9,15 @@ from typing import Any
 import chainlit as cl
 from chainlit.chat_context import chat_context
 from chainlit.types import ThreadDict
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
+from agent_runtime.message_types import (
+    AIMessage,
+    AgentMessageObject,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+)
 from workspace.path_resolver import to_project_relative_path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -101,7 +107,9 @@ def build_human_message_from_chainlit_message(message: cl.Message) -> HumanMessa
     return HumanMessage(content="\n\n".join(text_parts), id=message_id or None)
 
 
-def build_langchain_message_from_chainlit_history_message(message: cl.Message):
+def build_langchain_message_from_chainlit_history_message(
+    message: cl.Message,
+) -> AgentMessageObject | None:
     message_type = str(getattr(message, "type", "") or "")
     message_id = str(getattr(message, "id", "") or "")
     content = str(getattr(message, "content", "") or "")
