@@ -74,6 +74,7 @@ from app.chainlit_streaming import (
     step_name as _step_name,
     sync_todos_to_tasklist as _sync_todos_to_tasklist,
     tool_call_summary as _tool_call_summary,
+    tool_input_for_step as _tool_input_for_step,
     update_preview as _update_preview,
 )
 from app.chainlit_runtime import (
@@ -287,9 +288,10 @@ async def on_message(message: cl.Message):
     async def _consume_v3_tool_call(tool_call_stream: Any) -> None:
         tool_name = str(getattr(tool_call_stream, "tool_name", "") or "tool")
         tool_input = getattr(tool_call_stream, "input", {}) or {}
+        step_input, show_input = _tool_input_for_step(tool_input)
 
-        step = cl.Step(name=_step_name("tool", tool_name), type="tool", show_input=True)
-        step.input = str(tool_input)[:600]
+        step = cl.Step(name=_step_name("tool", tool_name), type="tool", show_input=show_input)
+        step.input = step_input
         step_sent = False
 
         try:

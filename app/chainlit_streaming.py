@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import chainlit as cl
 
 from agent_runtime.message_types import message_text
+
+INTERNAL_TOOL_INPUT_KEYS = {
+    "callbacks",
+    "config",
+    "handler",
+    "run_manager",
+    "runtime",
+    "state",
+    "store",
+    "stream_writer",
+    "tool_call_id",
+}
 
 TODO_STATUS_MAP = {
     "pending": cl.TaskStatus.READY,
@@ -64,6 +77,28 @@ def tool_call_summary(tool_calls: Any) -> str:
     if not names:
         return ""
     return f"Tool calls: {', '.join(names[:5])}"
+
+
+def _filter_internal_tool_input(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _filter_internal_tool_input(item)
+            for key, item in value.items()
+            if str(key) not in INTERNAL_TOOL_INPUT_KEYS
+        }
+    if isinstance(value, list | tuple):
+        return [_filter_internal_tool_input(item) for item in value]
+    return value
+
+
+def tool_input_for_step(tool_input: Any) -> tuple[Any, bool | str]:
+    """Return Chainlit Step.input content and show_input value for a tool call."""
+    display_input = _filter_internal_tool_input({} if tool_input is None else tool_input)
+    if not display_input:
+        return "", False
+    if isinstance(display_input, dict | list | tuple):
+        return display_input, "json"
+    return display_input, "text"
 
 
 def update_preview(update: dict[str, Any]) -> str:
