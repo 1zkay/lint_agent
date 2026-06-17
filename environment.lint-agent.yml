@@ -9,27 +9,27 @@ dependencies:
       - aiofiles==24.1.0
       - boto3==1.42.62
       - chainlit==2.11.1
-      - deepagents==0.5.3
+      - deepagents==0.6.10
       - faiss-cpu==1.13.2
       - fastmcp==3.1.0
-      - langchain==1.2.15
-      - langchain-anthropic==1.4.1
-      - langchain-community==0.4.1
-      - langchain-core==1.3.0
-      - langchain-google-genai==4.2.1
-      - langchain-huggingface==1.2.1
-      - langchain-mcp-adapters==0.2.1
-      - langchain-ollama==1.0.1
-      - langchain-openai==1.1.10
-      - langchain-tavily==0.2.17
-      - langchain-text-splitters==1.1.1
-      - langgraph==1.1.6
-      - langgraph-checkpoint==4.0.1
-      - langgraph-checkpoint-postgres==3.0.4
-      - langgraph-cli[inmem]
-      - langgraph-prebuilt==1.0.9
+      - langchain==1.3.9
+      - langchain-anthropic==1.4.6
+      - langchain-community==0.4.2
+      - langchain-core==1.4.7
+      - langchain-google-genai==4.2.5
+      - langchain-huggingface==1.2.2
+      - langchain-mcp-adapters==0.3.0
+      - langchain-ollama==1.1.0
+      - langchain-openai==1.3.2
+      - langchain-tavily==0.2.18
+      - langchain-text-splitters==1.1.2
+      - langgraph==1.2.5
+      - langgraph-checkpoint==4.1.1
+      - langgraph-checkpoint-postgres==3.1.0
+      - langgraph-cli[inmem]==0.4.30
+      - langgraph-prebuilt==1.1.0
       - mcp==1.26.0
-      - openai==2.20.0
+      - openai==2.42.0
       - psycopg[binary,pool]==3.3.3
       - pydantic[email]==2.11.7
       - pypdf==6.9.1
