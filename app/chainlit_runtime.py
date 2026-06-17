@@ -10,11 +10,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import chainlit as cl
-from langchain.agents import create_agent
 
 from agent_runtime.checkpointer import build_checkpointer
 from agent_runtime.configuration import build_runtime_config_for_llm_preset, resolve_llm_preset_id
-from agent_runtime.middleware import build_agent_middleware
+from agent_runtime.middleware import create_lint_deep_agent
 from agent_runtime.prompts import SYSTEM_PROMPT
 from agent_runtime.tools import load_agent_tools
 from config import config
@@ -114,22 +113,18 @@ async def _run_chat_runtime_owner(
 
         checkpointer = await build_checkpointer(exit_stack, log_prefix="[chat_app]")
         memory_store = await build_memory_store(config, exit_stack)
-        middleware_stack, approval_guarded_tools = build_agent_middleware(
-            llm,
-            root_dir=PROJECT_ROOT,
-            log_prefix="[chat_app]",
-            disable_shell_if_unavailable=True,
-        )
-
-        agent = create_agent(
+        agent, approval_guarded_tools, runtime_tool_names = create_lint_deep_agent(
             llm,
             tools,
+            root_dir=PROJECT_ROOT,
+            log_prefix="[chat_app]",
             system_prompt=SYSTEM_PROMPT,
-            middleware=middleware_stack,
             checkpointer=checkpointer,
             store=memory_store,
             context_schema=AgentContext,
+            disable_shell_if_unavailable=True,
         )
+        tool_names = list(dict.fromkeys([*tool_names, *runtime_tool_names]))
         if approval_guarded_tools:
             logger.info("[chat_app] Tool approval enabled for: %s", approval_guarded_tools)
 
@@ -240,7 +235,7 @@ async def initialize_chat_runtime(
         )
     await cl.Message(
         content=(
-            f"**已连接 MCP 工具（{len(tool_names)} 个）：**\n{tools_list}\n\n"
+            f"**可用工具（MCP / 中间件 / 本地工具，共 {len(tool_names)} 个）：**\n{tools_list}\n\n"
             "文件工具根目录：`GLOBAL`\n\n"
             f"当前模型：`{runtime_cfg.llm_model}`"
             f"{history_hint}"

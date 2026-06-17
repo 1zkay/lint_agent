@@ -1,19 +1,19 @@
 """
-ALINT-PRO Chainlit 聊天应用（MCP Client + create_agent 版）
+ALINT-PRO Chainlit 聊天应用（MCP Client + create_deep_agent 版）
 
 架构（基于 LangChain/LangGraph 官方 API）：
-  LLM ←→ create_agent(langchain.agents) ←→ MCP Session(持久 stdio)
+  LLM ←→ create_deep_agent(deepagents) ←→ MCP Session(持久 stdio)
 
 官方 API 对照：
-  图构造 : create_agent(llm, tools, system_prompt=..., checkpointer=...)
-          来源: https://docs.langchain.com/oss/python/langchain/agents
+  图构造 : create_deep_agent(model=llm, tools=..., system_prompt=..., checkpointer=...)
+          来源: https://github.com/langchain-ai/deepagents
   流式   : agent.astream_events(..., version="v3")
-          -> run.messages/run.tool_calls/run.updates
+          -> run.messages/run.tool_calls/run.subagents/run.updates
           来源: https://docs.langchain.com/oss/python/langchain/event-streaming
   Step   : step.input = ... / step.output = ... （官方字段）
           来源: https://docs.chainlit.io/api-reference/step-class
-  审批   : HumanInTheLoopMiddleware + Command(resume=...)
-          来源: https://docs.langchain.com/oss/python/langchain/human-in-the-loop
+  审批   : create_deep_agent(interrupt_on=...) + Command(resume=...)
+          来源: https://docs.langchain.com/oss/python/deepagents/human-in-the-loop
   MCP    : AsyncExitStack + client.session("name") + load_mcp_tools(session)
           来源: https://github.com/langchain-ai/langchain-mcp-adapters README
   状态写回: agent.aupdate_state(config={"configurable":{"thread_id":...}}, values={"messages":[...]})
@@ -21,7 +21,7 @@ ALINT-PRO Chainlit 聊天应用（MCP Client + create_agent 版）
 
 多轮历史：由 checkpointer（postgres/memory）按 thread_id 自动管理。
   每轮只传当前 HumanMessage；history（含 ToolMessage）由 checkpointer 追加累积。
-  create_agent 内部正确处理多轮 ToolMessage，不会产生无限循环。
+  create_deep_agent 内部正确处理多轮 ToolMessage，不会产生无限循环。
 
 启动：
   chainlit run chat_app.py -w
@@ -88,14 +88,10 @@ from agent_runtime.message_types import (
     message_text as _message_text,
     message_tool_calls as _message_tool_calls,
 )
-from compat.langgraph import apply_recursive_send_sanitization
 from config import config
 
 logger = logging.getLogger(__name__)
-
-# ── 源头治理：递归清理 Send.arg 中不可序列化的中间件状态 ──────────────
-# 兼容补丁集中在 compat.langgraph，便于后续官方修复后统一移除。
-apply_recursive_send_sanitization(log_prefix="[chat_app]")
+SUBAGENT_DISPATCH_TOOL_NAMES = {"task"}
 
 if config.chainlit_enable_password_auth:
     @cl.password_auth_callback
@@ -190,7 +186,7 @@ async def on_chat_end():
 @cl.on_message
 async def on_message(message: cl.Message):
     """
-    接收用户消息，统一走 create_agent 主链路（官方短期记忆主入口）。
+    接收用户消息，统一走 create_deep_agent 主链路（官方短期记忆主入口）。
 
     流式处理采用官方推荐的 v3 event streaming API：
       run.messages：LLM 输出 token
@@ -240,11 +236,16 @@ async def on_message(message: cl.Message):
 
     # ── 流式处理（v3 typed projections）────────────────────────────────────
     # 官方标准参考：https://docs.langchain.com/oss/python/langchain/event-streaming
-    # run.messages 负责 token；create_agent 内置 ToolCallTransformer 提供 run.tool_calls。
+    # run.messages 负责 token；create_deep_agent 内置 ToolCallTransformer 提供 run.tool_calls。
     # UpdatesTransformer 显式开启 run.updates，用于同步 todos 和最终回答状态。
     # ─────────────────────────────────────────────────────────────────────────
     response_msg = cl.Message(content="")
     await response_msg.send()
+    task_list = cl.user_session.get("task_list")
+    if task_list:
+        task_list.tasks.clear()
+        task_list.status = "Ready"
+        await task_list.send()
 
     llm_step_by_node: dict[str, cl.Step] = {}
     llm_output_by_node: dict[str, str] = {}
@@ -285,12 +286,74 @@ async def on_message(message: cl.Message):
         async for message_stream in run.messages:
             await _consume_v3_message_stream(message_stream)
 
-    async def _consume_v3_tool_call(tool_call_stream: Any) -> None:
+    async def _consume_v3_tool_output_deltas(tool_call_stream: Any, step: cl.Step) -> None:
+        deltas = getattr(tool_call_stream, "output_deltas", None)
+        if deltas is not None:
+            async for delta in deltas:
+                delta_text = _message_text(delta) or (str(delta) if delta is not None else "")
+                if delta_text:
+                    await step.stream_token(delta_text)
+            return
+
+        async for delta in tool_call_stream:
+            delta_text = _message_text(delta) or (str(delta) if delta is not None else "")
+            if delta_text:
+                await step.stream_token(delta_text)
+
+    async def _drain_v3_tool_output_deltas(tool_call_stream: Any) -> None:
+        deltas = getattr(tool_call_stream, "output_deltas", None)
+        if deltas is not None:
+            async for _delta in deltas:
+                pass
+            return
+
+        async for _delta in tool_call_stream:
+            pass
+
+    async def _consume_v3_tool_call(
+        tool_call_stream: Any,
+        *,
+        parent_id: str | None = None,
+        default_open: bool = False,
+        output_limit: int = 10000,
+    ) -> None:
         tool_name = str(getattr(tool_call_stream, "tool_name", "") or "tool")
         tool_input = getattr(tool_call_stream, "input", {}) or {}
+        if tool_name in SUBAGENT_DISPATCH_TOOL_NAMES:
+            await _drain_v3_tool_output_deltas(tool_call_stream)
+            error = str(getattr(tool_call_stream, "error", "") or "")
+            if error:
+                subagent_type = ""
+                if isinstance(tool_input, dict):
+                    subagent_type = str(tool_input.get("subagent_type") or "").strip()
+
+                task_step_name = "🤖 task"
+                if subagent_type:
+                    task_step_name = f"🤖 {subagent_type}"
+
+                step = cl.Step(
+                    name=task_step_name,
+                    type="run",
+                    parent_id=parent_id,
+                    default_open=default_open,
+                    auto_collapse=True,
+                )
+                step.is_error = True
+                step.output = error[:output_limit]
+                await step.send()
+                await step.update()
+            return
+
         step_input, show_input = _tool_input_for_step(tool_input)
 
-        step = cl.Step(name=_step_name("tool", tool_name), type="tool", show_input=show_input)
+        step = cl.Step(
+            name=_step_name("tool", tool_name),
+            type="tool",
+            parent_id=parent_id,
+            show_input=show_input,
+            default_open=default_open,
+            auto_collapse=parent_id is not None,
+        )
         step.input = step_input
         step_sent = False
 
@@ -298,16 +361,17 @@ async def on_message(message: cl.Message):
             await step.send()
             step_sent = True
 
-            async for _delta in tool_call_stream:
-                pass
+            await _consume_v3_tool_output_deltas(tool_call_stream, step)
 
             error = str(getattr(tool_call_stream, "error", "") or "")
             if error:
-                step.output = f"Error: {error}"[:800]
+                step.is_error = True
+                step.output = error[:output_limit]
             else:
                 output = getattr(tool_call_stream, "output", "")
                 output_text = _message_text(output) or (str(output) if output is not None else "")
-                step.output = output_text[:800]
+                if output_text:
+                    step.output = output_text[:output_limit]
         finally:
             if step_sent:
                 try:
@@ -321,6 +385,91 @@ async def on_message(message: cl.Message):
             tool_tasks.append(asyncio.create_task(_consume_v3_tool_call(tool_call_stream)))
         if tool_tasks:
             await asyncio.gather(*tool_tasks)
+
+    async def _consume_v3_subagent(subagent_stream: Any) -> None:
+        subagent_name = str(
+            getattr(subagent_stream, "name", None)
+            or "subagent"
+        )
+        step = cl.Step(name=f"🤖 {subagent_name}", type="run", default_open=True)
+        step_sent = False
+        output_buffer = ""
+
+        async def _consume_subagent_messages() -> None:
+            nonlocal output_buffer
+
+            async for message_stream in subagent_stream.messages:
+                async for token_text in message_stream.text:
+                    token_text = str(token_text or "")
+                    if not token_text:
+                        continue
+                    output_buffer += token_text
+                    await step.stream_token(token_text)
+
+        async def _consume_subagent_tool_calls() -> None:
+            tool_calls = getattr(subagent_stream, "tool_calls", None)
+            if tool_calls is None:
+                return
+            tool_tasks: list[asyncio.Task[None]] = []
+            async for tool_call_stream in tool_calls:
+                tool_tasks.append(
+                    asyncio.create_task(
+                        _consume_v3_tool_call(
+                            tool_call_stream,
+                            parent_id=step.id,
+                            default_open=False,
+                            output_limit=10000,
+                        )
+                    )
+                )
+            if tool_tasks:
+                await asyncio.gather(*tool_tasks)
+
+        try:
+            await step.send()
+            step_sent = True
+
+            await asyncio.gather(
+                _consume_subagent_messages(),
+                _consume_subagent_tool_calls(),
+            )
+
+            error = str(getattr(subagent_stream, "error", "") or "")
+            if error:
+                step.is_error = True
+                step.output = error[:10000]
+            elif output_buffer:
+                step.output = output_buffer[:10000]
+            else:
+                try:
+                    output = await subagent_stream.output()
+                except Exception as exc:
+                    step.is_error = True
+                    step.output = str(exc)[:10000]
+                else:
+                    messages = output.get("messages") if isinstance(output, dict) else None
+                    last_msg = messages[-1] if messages else None
+                    step.output = (
+                        _message_preview(last_msg)
+                        if last_msg is not None
+                        else f"Status: {getattr(subagent_stream, 'status', 'completed')}"
+                    )[:10000]
+        finally:
+            if step_sent:
+                try:
+                    await step.update()
+                except Exception:
+                    pass
+
+    async def _consume_v3_subagents(run: Any) -> None:
+        subagent_streams = getattr(run, "subagents", None)
+        if subagent_streams is None:
+            return
+        subagent_tasks: list[asyncio.Task[None]] = []
+        async for subagent_stream in subagent_streams:
+            subagent_tasks.append(asyncio.create_task(_consume_v3_subagent(subagent_stream)))
+        if subagent_tasks:
+            await asyncio.gather(*subagent_tasks)
 
     async def _process_v3_update_data(data: Any) -> None:
         nonlocal _model_text_buffer, _write_todos_text_fallback
@@ -400,6 +549,7 @@ async def on_message(message: cl.Message):
                 await asyncio.gather(
                     _consume_v3_messages(run),
                     _consume_v3_tool_calls(run),
+                    _consume_v3_subagents(run),
                     _consume_v3_updates(run),
                 )
                 if await run.interrupted():

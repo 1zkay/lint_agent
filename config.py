@@ -234,10 +234,6 @@ class Config:
         )
 
         # ── Agent 中间件 ──────────────────────────────────────────────────
-        self.agent_enable_todo = self._bool_env("AGENT_ENABLE_TODO", "true")
-        self.agent_enable_summarization = self._bool_env("AGENT_ENABLE_SUMMARIZATION", "true")
-        self.agent_summarization_trigger_tokens = int(os.getenv("AGENT_SUMMARIZATION_TRIGGER_TOKENS", "60000"))
-        self.agent_summarization_keep_messages = int(os.getenv("AGENT_SUMMARIZATION_KEEP_MESSAGES", "20"))
         self.agent_enable_reflection = self._bool_env("AGENT_ENABLE_REFLECTION", "false")
         self.agent_reflection_max = int(os.getenv("AGENT_REFLECTION_MAX", "1"))
         self.agent_enable_model_retry = self._bool_env("AGENT_ENABLE_MODEL_RETRY", "true")
@@ -248,6 +244,7 @@ class Config:
         self.shell_workspace_root = os.getenv("SHELL_WORKSPACE_ROOT", "").strip()
         self.shell_command_timeout = float(os.getenv("SHELL_COMMAND_TIMEOUT", "30"))
         self.shell_max_output_lines = int(os.getenv("SHELL_MAX_OUTPUT_LINES", "200"))
+        self.agent_enable_subagents = self._bool_env("AGENT_ENABLE_SUBAGENTS", "true")
         self.agent_enable_skills = self._bool_env("AGENT_ENABLE_SKILLS", "false")
         self.agent_skills_dirs = [
             d.strip() for d in os.getenv("AGENT_SKILLS_DIRS", "").split(",") if d.strip()

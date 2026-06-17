@@ -17,7 +17,7 @@ unavailable or return graceful failure messages.
 ## What This Project Does
 
 - Provides a Chainlit chat UI for Verilog lint diagnosis.
-- Uses LangChain `create_agent` as the main agent runtime.
+- Uses DeepAgents `create_deep_agent` as the main agent runtime.
 - Uses MCP to expose the lint tool, Yosys, resources, and prompts as standard tools.
 - Uses LangGraph `StateGraph` for deterministic EDA preprocessing workflows.
 - Uses the lint tool to generate lint violation CSV reports.
@@ -31,8 +31,10 @@ unavailable or return graceful failure messages.
 Chainlit Web UI
   |
   v
-LangChain create_agent
-  |-- Middleware: todo, filesystem, summarization, retry, HITL, skills, reflection
+DeepAgents create_deep_agent
+  |-- Official base: todo, filesystem, skills, subagents, summarization, patching
+  |-- Project middleware: retry, reflection, shell
+  |-- HITL: create_deep_agent(interrupt_on=...)
   |-- Memory tools
   |-- Agentic RAG tool
   |

@@ -29,15 +29,18 @@ TODO_STATUS_MAP = {
 
 
 async def sync_todos_to_tasklist(todos: list[dict]) -> None:
-    """将 TodoListMiddleware 的 todos 状态同步到 Chainlit TaskList 面板。"""
+    """将主智能体 TodoListMiddleware 的 todos 同步到 Chainlit TaskList 面板。"""
     task_list = cl.user_session.get("task_list")
     if not task_list:
         return
 
     task_list.tasks.clear()
     for todo in todos:
+        title = str(todo.get("content", "")).strip()
+        if not title:
+            continue
         task = cl.Task(
-            title=todo.get("content", ""),
+            title=title,
             status=TODO_STATUS_MAP.get(todo.get("status", "pending"), cl.TaskStatus.READY),
         )
         await task_list.add_task(task)
@@ -63,7 +66,7 @@ def step_name(step_type: str, node_name: str) -> str:
 
 
 def message_preview(message: Any) -> str:
-    return message_text(message)[:800]
+    return message_text(message)[:10000]
 
 
 def tool_call_summary(tool_calls: Any) -> str:
@@ -76,7 +79,7 @@ def tool_call_summary(tool_calls: Any) -> str:
     ]
     if not names:
         return ""
-    return f"Tool calls: {', '.join(names[:5])}"
+    return f"Tool calls: {', '.join(names[:10000])}"
 
 
 def _filter_internal_tool_input(value: Any) -> Any:
@@ -109,7 +112,7 @@ def update_preview(update: dict[str, Any]) -> str:
     }
     if not payload:
         return ""
-    return str(payload)[:800]
+    return str(payload)[:10000]
 
 
 def should_show_run_step(node_name: str) -> bool:

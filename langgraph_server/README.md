@@ -13,7 +13,7 @@
 当前实现采用 LangGraph Server 的标准 graph factory 形态：
 
 - `langgraph.json` 声明 graph ID `lint`，入口为 `./langgraph_server/agent_runtime.py:lint_agent_graph`。
-- `lint_agent_graph(runtime)` 是异步 context manager，返回由 LangChain `create_agent` 创建的 agent graph。
+- `lint_agent_graph(runtime)` 是异步 context manager，返回由 DeepAgents `create_deep_agent` 创建的 agent graph。
 - LangGraph Server 负责 HTTP API、thread、run、store 的服务端管理；本项目在 graph factory 中读取 `runtime.store` 并注入给 agent。
 - 主 agent 共享根目录的运行时模块：`agent_runtime/`、`memory/`、`rag/`、`llm/`、`compat/`。
 - MCP 工具通过 stdio 子进程加载，启动方式是 `python -m mcp_server.server`。
@@ -36,7 +36,7 @@ langgraph_server/
 ```text
 agent_runtime/
   configuration.py                  # LLM preset 解析
-  middleware.py                     # todo、filesystem、skills、HITL、retry、reflection 等 middleware
+  middleware.py                     # create_deep_agent 入口、项目 middleware、interrupt_on 配置
   prompts.py                        # agent system prompt
   tools.py                          # MCP/RAG/web/memory 工具加载
 compat/
@@ -312,8 +312,7 @@ customer-data/langgraph_api/
 
 `langgraph_server/agent_runtime.py` 启动时会做以下事情：
 
-1. 应用 LangGraph 兼容补丁：
-   - `LINT_AGENT_PATCH_LANGGRAPH_SEND=true`
+1. 应用 LangGraph dev persistence 兼容补丁：
    - `LINT_AGENT_PATCH_LANGGRAPH_DEV_PERSISTENCE=true`
 2. 读取 `.env` 和 `config.py`。
 3. 根据默认 LLM preset 构建 chat model。
@@ -332,8 +331,8 @@ customer-data/langgraph_api/
    - ModelRetry
    - ToolRetry
    - Shell
-   - HumanInTheLoop
-6. 使用 `create_agent(...)` 创建最终 agent。
+   - HITL via `create_deep_agent(interrupt_on=...)` when enabled
+6. 使用 `create_deep_agent(...)` 创建最终 agent。
 
 LLM、MCP session 和工具会在 Agent Server 进程内缓存，避免每个请求重复初始化。首次加载可能较慢，后续调用应复用缓存。
 
@@ -345,7 +344,7 @@ LLM、MCP session 和工具会在 Agent Server 进程内缓存，避免每个请
 AGENT_TOOL_APPROVAL_ENABLED=true
 ```
 
-则高风险工具会经过 LangChain `HumanInTheLoopMiddleware`。当前审批覆盖的工具由 `agent_runtime/middleware.py` 统一构建，包含文件写入、删除、移动、复制和 shell 等操作。
+则高风险工具会通过 DeepAgents `create_deep_agent(interrupt_on=...)` 进入官方 HITL 流程。当前审批覆盖的工具由 `agent_runtime/middleware.py` 统一生成 `interrupt_on` 配置，包含文件写入和 shell 等操作。
 
 交互式 CLI 会提示人工决策；非交互场景可以使用：
 
@@ -456,23 +455,20 @@ lint-agent "继续这个 thread"
 
 ## 兼容补丁
 
-当前默认启用两个补丁：
+当前默认启用一个 `langgraph dev` 本地持久化补丁：
 
 ```env
-LINT_AGENT_PATCH_LANGGRAPH_SEND=true
 LINT_AGENT_PATCH_LANGGRAPH_DEV_PERSISTENCE=true
 ```
 
 用途：
 
-- `LINT_AGENT_PATCH_LANGGRAPH_SEND`：递归清理 LangGraph `Send` 中嵌套的不可序列化运行时对象，避免 MCP/shell session 对象进入 checkpoint。
 - `LINT_AGENT_PATCH_LANGGRAPH_DEV_PERSISTENCE`：仅用于 `langgraph dev` 本地 `.langgraph_api` 落盘时，清理不可 pickle 对象，避免 Windows + MCP stdio 下出现 `TextIOWrapper` pickle 异常。
 
 如果未来升级 LangGraph 后官方已经修复，可以临时关闭验证：
 
 ```powershell
 $env:LINT_AGENT_PATCH_LANGGRAPH_DEV_PERSISTENCE = "false"
-$env:LINT_AGENT_PATCH_LANGGRAPH_SEND = "false"
 D:\mcp\lint_agent\langgraph_server\start_langgraph_agent_server.cmd
 ```
 

@@ -9,17 +9,14 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from langchain.agents import create_agent
-
 from agent_runtime.configuration import (
     build_runtime_config_for_llm_preset,
 )
-from agent_runtime.middleware import build_agent_middleware
+from agent_runtime.middleware import create_lint_deep_agent
 from agent_runtime.prompts import SYSTEM_PROMPT
 from agent_runtime.tools import load_agent_tools
 from compat.langgraph import (
     apply_dev_persistence_pickle_sanitization,
-    apply_recursive_send_sanitization,
 )
 from config import config
 from llm.factory import build_chat_model_from_config
@@ -53,17 +50,6 @@ if _bool_env(
     legacy_key="MCP_ALINT_PATCH_LANGGRAPH_DEV_PERSISTENCE",
 ):
     apply_dev_persistence_pickle_sanitization(log_prefix="[agent_runtime]")
-if _bool_env(
-    "LINT_AGENT_PATCH_LANGGRAPH_SEND",
-    True,
-    legacy_key="MCP_ALINT_PATCH_LANGGRAPH_SEND",
-):
-    apply_recursive_send_sanitization(
-        log_prefix="[agent_runtime]",
-        drop_unpickleable=True,
-    )
-
-
 def build_llm_for_runtime_config(runtime_cfg: Any) -> Any:
     if not runtime_cfg.llm_model:
         raise RuntimeError("LLM_MODEL is empty. Configure .env before starting LangGraph Agent Server.")
@@ -159,23 +145,17 @@ async def lint_agent_graph(runtime: ServerRuntime | None = None) -> AsyncIterato
     tools = components["tools"]
     store = getattr(runtime, "store", None) if runtime is not None else None
 
-    agent_kwargs: dict[str, Any] = {
-        "middleware": build_agent_middleware(
-            llm,
-            root_dir=REPO_ROOT,
-            log_prefix="[agent_runtime]",
-        )[0],
-        "context_schema": AgentContext,
-        "system_prompt": SYSTEM_PROMPT,
-    }
-    if store is not None:
-        agent_kwargs["store"] = store
-
-    yield create_agent(
+    agent, _, _ = create_lint_deep_agent(
         llm,
         tools,
-        **agent_kwargs,
+        root_dir=REPO_ROOT,
+        log_prefix="[agent_runtime]",
+        system_prompt=SYSTEM_PROMPT,
+        store=store,
+        context_schema=AgentContext,
     )
+
+    yield agent
 
 
 async def ainvoke_once(
