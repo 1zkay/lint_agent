@@ -10,6 +10,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from deepagents import create_deep_agent
+from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.middleware import filesystem as deepagents_filesystem
 from langchain.agents.middleware import (
@@ -161,6 +162,24 @@ def _build_deep_agent_system_prompt(system_prompt: str) -> str:
     return "\n\n".join(part.strip() for part in parts if part and part.strip())
 
 
+def _build_deep_agent_backend(root_path: Path) -> CompositeBackend:
+    """Route DeepAgents artifacts under the project while preserving native paths."""
+    return CompositeBackend(
+        default=FilesystemBackend(root_dir=str(root_path), virtual_mode=False),
+        routes={
+            "/conversation_history/": FilesystemBackend(
+                root_dir=str(root_path / "conversation_history"),
+                virtual_mode=True,
+            ),
+            "/large_tool_results/": FilesystemBackend(
+                root_dir=str(root_path / "large_tool_results"),
+                virtual_mode=True,
+            ),
+        },
+        artifacts_root="/",
+    )
+
+
 def _build_project_middleware(
     llm: Any,
     *,
@@ -286,12 +305,16 @@ def create_lint_deep_agent(
         middleware=middleware_stack,
         subagents=subagents,
         skills=skill_sources,
-        backend=FilesystemBackend(root_dir=str(root_path), virtual_mode=False),
+        backend=_build_deep_agent_backend(root_path),
         interrupt_on=interrupt_on,
         checkpointer=checkpointer,
         store=store,
         context_schema=context_schema,
     )
 
-    logger.info("%s create_deep_agent enabled (root_dir=%s, backend=filesystem/native paths)", log_prefix, root_path)
+    logger.info(
+        "%s create_deep_agent enabled (root_dir=%s, backend=filesystem/native paths + routed artifacts)",
+        log_prefix,
+        root_path,
+    )
     return agent, guarded_tools, list(dict.fromkeys(["task", *runtime_tool_names]))

@@ -25,6 +25,8 @@ env/
 
 # Generated reports and runtime artifacts
 reports/
+conversation_history/
+large_tool_results/
 .lint_agent_jobs/
 *.log
 *.tmp
