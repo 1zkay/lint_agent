@@ -13,6 +13,12 @@ def is_openrouter_base_url(base_url: str | None) -> bool:
     return bool(base_url and "openrouter.ai" in base_url.lower())
 
 
+def is_siliconflow_base_url(base_url: str | None) -> bool:
+    """Return True when the configured base URL points to SiliconFlow."""
+
+    return bool(base_url and "siliconflow" in base_url.lower())
+
+
 def build_openrouter_default_headers(base_url: str, cfg: Any) -> dict[str, str] | None:
     """Return OpenRouter-required headers for OpenRouter-compatible endpoints."""
 
@@ -44,6 +50,11 @@ def build_chat_model_from_config(
         kwargs["api_key"] = cfg.llm_api_key
     if cfg.llm_base_url:
         kwargs["base_url"] = cfg.llm_base_url
+
+    if is_siliconflow_base_url(cfg.llm_base_url):
+        kwargs["streaming"] = False
+        if logger is not None:
+            logger.info("%s SiliconFlow detected, disabling model streaming", log_prefix)
 
     default_headers = build_openrouter_default_headers(cfg.llm_base_url, cfg)
     if default_headers:
