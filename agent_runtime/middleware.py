@@ -218,11 +218,6 @@ def disable_default_general_purpose_subagent(llm: Any, *, log_prefix: str) -> bo
         register_harness_profile(profile_key, profile)
         _DISABLED_GENERAL_PURPOSE_PROFILE_KEYS.add(profile_key)
 
-    logger.info(
-        "%s DeepAgents default general-purpose subagent disabled (profile_key=%s)",
-        log_prefix,
-        profile_key,
-    )
     return True
 
 

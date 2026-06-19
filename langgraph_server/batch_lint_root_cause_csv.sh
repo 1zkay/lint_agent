@@ -177,6 +177,46 @@ format_candidates() {
   return 0
 }
 
+print_report_paths_from_response() {
+  local response_file="$1"
+  local path
+  local existing
+  local duplicate
+  local absolute_found=0
+  local paths=()
+
+  while IFS= read -r path; do
+    duplicate=0
+    for existing in "${paths[@]}"; do
+      if [[ "$existing" == "$path" ]]; then
+        duplicate=1
+        break
+      fi
+    done
+    [[ "$duplicate" == "1" ]] || paths+=("$path")
+  done < <(
+    grep -Eao '(/[^"[:space:]\\]*/)?reports/verilog_lint_root_cause_[0-9]{8}_[0-9]{6}\.csv' "$response_file" || true
+  )
+
+  if [[ "${#paths[@]}" -eq 0 ]]; then
+    return 1
+  fi
+
+  for path in "${paths[@]}"; do
+    if [[ "$path" == /* ]]; then
+      absolute_found=1
+      break
+    fi
+  done
+
+  for path in "${paths[@]}"; do
+    if [[ "$absolute_found" == "1" && "$path" != /* ]]; then
+      continue
+    fi
+    printf 'report: %s\n' "$path"
+  done
+}
+
 cancel_run() {
   local thread_id="$1"
   local run_id="$2"
@@ -382,7 +422,9 @@ finalize_done_jobs() {
 
     printf '\ncompleted: %s\n' "${submitted_stems[index]}"
     printf 'assistant response saved: %s\n' "$response_file"
-    printf 'done: thread %s finished. See assistant response for output CSV path.\n' "${submitted_thread_ids[index]}"
+    if ! print_report_paths_from_response "$response_file"; then
+      warn "could not find output CSV path for ${submitted_stems[index]}. Response log: $response_file"
+    fi
     success_count=$((success_count + 1))
   done
 
