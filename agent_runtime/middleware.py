@@ -6,10 +6,16 @@ import logging
 import os
 import shutil
 import sys
+from collections.abc import Mapping
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from deepagents import create_deep_agent
+from deepagents import (
+    GeneralPurposeSubagentProfile,
+    HarnessProfile,
+    create_deep_agent,
+    register_harness_profile,
+)
 from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.middleware import filesystem as deepagents_filesystem
@@ -35,6 +41,7 @@ from workspace.path_resolver import (
 
 logger = logging.getLogger(__name__)
 _FILESYSTEM_ROOT_PATH: Path | None = None
+_DISABLED_GENERAL_PURPOSE_PROFILE_KEYS: set[str] = set()
 
 
 FILESYSTEM_PATH_SYSTEM_PROMPT = """## Project Filesystem Path Conventions
@@ -180,6 +187,45 @@ def _build_deep_agent_backend(root_path: Path) -> CompositeBackend:
     )
 
 
+def _harness_profile_key_for_llm(llm: Any) -> str | None:
+    """Return the DeepAgents provider-level harness profile key for the active model."""
+    try:
+        ls_params = llm._get_ls_params()
+    except (AttributeError, TypeError, NotImplementedError):
+        ls_params = None
+    if isinstance(ls_params, Mapping):
+        provider_value = ls_params.get("ls_provider")
+        if isinstance(provider_value, str) and provider_value.strip():
+            return provider_value.strip()
+    return None
+
+
+def disable_default_general_purpose_subagent(llm: Any, *, log_prefix: str) -> bool:
+    """Disable DeepAgents' auto-added `general-purpose` subagent via official profiles."""
+    profile_key = _harness_profile_key_for_llm(llm)
+    if profile_key is None:
+        logger.warning(
+            "%s could not disable DeepAgents default general-purpose subagent: "
+            "model provider/profile key is unavailable.",
+            log_prefix,
+        )
+        return False
+
+    profile = HarnessProfile(
+        general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False),
+    )
+    if profile_key not in _DISABLED_GENERAL_PURPOSE_PROFILE_KEYS:
+        register_harness_profile(profile_key, profile)
+        _DISABLED_GENERAL_PURPOSE_PROFILE_KEYS.add(profile_key)
+
+    logger.info(
+        "%s DeepAgents default general-purpose subagent disabled (profile_key=%s)",
+        log_prefix,
+        profile_key,
+    )
+    return True
+
+
 def _build_project_middleware(
     llm: Any,
     *,
@@ -272,6 +318,7 @@ def create_lint_deep_agent(
         logger.warning("%s create_deep_agent skills disabled: no skill sources resolved under %s", log_prefix, root_path)
 
     subagents = None
+    default_general_purpose_disabled = False
     if config.agent_enable_subagents:
         subagents = build_lint_subagents(
             llm,
@@ -285,7 +332,16 @@ def create_lint_deep_agent(
             [subagent["name"] for subagent in subagents],
         )
     else:
-        logger.info("%s create_deep_agent lint subagents disabled (general-purpose=auto)", log_prefix)
+        default_general_purpose_disabled = disable_default_general_purpose_subagent(
+            llm,
+            log_prefix=log_prefix,
+        )
+        general_purpose_state = "disabled" if default_general_purpose_disabled else "auto"
+        logger.info(
+            "%s create_deep_agent subagents disabled (general-purpose=%s)",
+            log_prefix,
+            general_purpose_state,
+        )
 
     interrupt_on, guarded_tools = build_tool_approval_interrupts()
     if guarded_tools:
@@ -317,4 +373,6 @@ def create_lint_deep_agent(
         log_prefix,
         root_path,
     )
-    return agent, guarded_tools, list(dict.fromkeys(["task", *runtime_tool_names]))
+    task_tool_available = config.agent_enable_subagents or not default_general_purpose_disabled
+    runtime_tools = ["task", *runtime_tool_names] if task_tool_available else runtime_tool_names
+    return agent, guarded_tools, list(dict.fromkeys(runtime_tools))
