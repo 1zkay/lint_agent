@@ -214,9 +214,12 @@ async def initialize_chat_runtime(
 
     tool_names = cast(list[str], setup_payload["tool_names"])
 
-    task_list = cl.TaskList()
-    cl.user_session.set("task_list", task_list)
-    await task_list.send()
+    if config.chainlit_show_todo_list:
+        task_list = cl.TaskList()
+        cl.user_session.set("task_list", task_list)
+        await task_list.send()
+    else:
+        cl.user_session.set("task_list", None)
 
     if not send_intro:
         return

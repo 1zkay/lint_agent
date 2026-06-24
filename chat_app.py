@@ -319,6 +319,9 @@ async def on_message(message: cl.Message):
     ) -> None:
         tool_name = str(getattr(tool_call_stream, "tool_name", "") or "tool")
         tool_input = getattr(tool_call_stream, "input", {}) or {}
+        if tool_name == "write_todos" and not config.chainlit_show_todo_list:
+            await _drain_v3_tool_output_deltas(tool_call_stream)
+            return
         if tool_name in SUBAGENT_DISPATCH_TOOL_NAMES:
             await _drain_v3_tool_output_deltas(tool_call_stream)
             error = str(getattr(tool_call_stream, "error", "") or "")

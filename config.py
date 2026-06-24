@@ -288,7 +288,8 @@ class Config:
         )
         self.memory_embed_dims = int(os.getenv("MEMORY_EMBED_DIMS", "0"))
 
-        # ── Chainlit 认证 ────────────────────────────────────────────────────
+        # ── Chainlit Web UI / 认证 ───────────────────────────────────────────
+        self.chainlit_show_todo_list = self._bool_env("CHAINLIT_SHOW_TODO_LIST", "true")
         self.chainlit_enable_password_auth = self._bool_env("CHAINLIT_ENABLE_PASSWORD_AUTH", "false")
         self.chainlit_auth_username = os.getenv("CHAINLIT_AUTH_USERNAME", "").strip()
         self.chainlit_auth_password = os.getenv("CHAINLIT_AUTH_PASSWORD", "").strip()
