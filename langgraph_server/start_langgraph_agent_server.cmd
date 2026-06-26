@@ -9,7 +9,7 @@ if errorlevel 1 (
 cd /d %~dp0..
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
-langgraph dev --config langgraph_server\langgraph.json --no-browser --allow-blocking --host 127.0.0.1 --port 2024
+langgraph dev --config langgraph_server\langgraph.json --no-browser --allow-blocking --host 0.0.0.0 --port 2024
 
 echo.
 echo LangGraph Agent Server exited.

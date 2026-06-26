@@ -62,14 +62,16 @@ D:\mcp\lint_agent\langgraph_server\start_langgraph_agent_server.cmd
 
 ```powershell
 cd D:\mcp\lint_agent
-langgraph dev --config langgraph_server\langgraph.json --no-browser --allow-blocking --host 127.0.0.1 --port 2024
+langgraph dev --config langgraph_server\langgraph.json --no-browser --allow-blocking --host 0.0.0.0 --port 2024
 ```
 
-默认服务地址：
+默认监听地址：
 
 ```text
-http://127.0.0.1:2024
+0.0.0.0:2024
 ```
+
+本机访问仍使用 `http://127.0.0.1:2024`；内网其他机器访问时使用部署机器的 IP 地址，例如 `http://<server-ip>:2024`。
 
 Graph ID：
 
@@ -82,7 +84,7 @@ lint
 启动成功后，日志中应出现类似内容：
 
 ```text
-API: http://127.0.0.1:2024
+API: http://0.0.0.0:2024
 ```
 
 也可以用健康检查确认服务已就绪：
@@ -527,7 +529,7 @@ Agent Server is not reachable at http://127.0.0.1:2024
 先确认 `start_langgraph_agent_server.cmd` 已启动，并且日志中出现：
 
 ```text
-API: http://127.0.0.1:2024
+API: http://0.0.0.0:2024
 ```
 
 ### thread_id 不合法

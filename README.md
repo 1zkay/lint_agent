@@ -252,7 +252,7 @@ Equivalent command:
 
 ```powershell
 cd <project-root>
-langgraph dev --config langgraph_server\langgraph.json --no-browser --allow-blocking --host 127.0.0.1 --port 2024
+langgraph dev --config langgraph_server\langgraph.json --no-browser --allow-blocking --host 0.0.0.0 --port 2024
 ```
 
 Default graph ID:
