@@ -6,6 +6,7 @@ LANGGRAPH_ASSISTANT="${LANGGRAPH_ASSISTANT:-lint}"
 LANGGRAPH_RECURSION_LIMIT="${LANGGRAPH_RECURSION_LIMIT:-1000}"
 LINT_AGENT_BATCH_TIMEOUT="${LINT_AGENT_BATCH_TIMEOUT:-7200}"
 LINT_AGENT_BATCH_JOBS="${LINT_AGENT_BATCH_JOBS:-1}"
+AGENT_DISPLAY_VERSION="v8"
 
 batch_jobs="$LINT_AGENT_BATCH_JOBS"
 SOURCE_ARCHIVE_SUFFIXES=(
@@ -24,6 +25,7 @@ SOURCE_ARCHIVE_SUFFIXES=(
 
 show_usage() {
   printf '用法: %s [-j 并发数]\n' "${0##*/}"
+  printf '智能体版本: %s\n' "$AGENT_DISPLAY_VERSION"
   printf '\n'
   printf '选项:\n'
   printf '  -j, --jobs N    同时运行的智能体分析数量，默认 1。\n'
@@ -38,6 +40,8 @@ show_usage() {
   printf '  LANGGRAPH_RECURSION_LIMIT  默认 1000\n'
   printf '  LINT_AGENT_BATCH_TIMEOUT   单个任务等待秒数，默认 7200\n'
   printf '  LINT_AGENT_BATCH_JOBS      默认并发数，默认 1\n'
+  printf '  ALINT_HOST_POSIX_SOURCE_ROOT  Linux 宿主机挂载源路径，默认 /\n'
+  printf '  ALINT_HOST_POSIX_MOUNT_ROOT   容器内挂载路径，默认 /host/root\n'
 }
 
 parse_args() {
@@ -108,6 +112,191 @@ default_user_id() {
   fi
 }
 
+trim_trailing_slash() {
+  local value="$1"
+
+  while [[ "$value" != "/" && "$value" == */ ]]; do
+    value="${value%/}"
+  done
+  printf '%s' "$value"
+}
+
+translate_linux_host_path_for_container() {
+  local path="$1"
+  local source_root="${ALINT_HOST_POSIX_SOURCE_ROOT:-/}"
+  local mount_root="${ALINT_HOST_POSIX_MOUNT_ROOT:-/host/root}"
+  local prefix
+  local rel
+
+  [[ "$path" == /* ]] || {
+    printf '%s' "$path"
+    return 0
+  }
+  [[ -n "$source_root" && -n "$mount_root" ]] || {
+    printf '%s' "$path"
+    return 0
+  }
+
+  source_root="$(trim_trailing_slash "$source_root")"
+  mount_root="$(trim_trailing_slash "$mount_root")"
+  [[ "$source_root" == /* && "$mount_root" == /* ]] || {
+    printf '%s' "$path"
+    return 0
+  }
+  [[ -d "$mount_root" ]] || {
+    printf '%s' "$path"
+    return 0
+  }
+
+  if [[ "$path" == "$mount_root" || "$path" == "$mount_root"/* ]]; then
+    printf '%s' "$path"
+    return 0
+  fi
+
+  if [[ "$source_root" == "/" ]]; then
+    if [[ "$path" == "/" ]]; then
+      printf '%s' "$mount_root"
+    else
+      printf '%s/%s' "$mount_root" "${path#/}"
+    fi
+    return 0
+  fi
+
+  if [[ "$path" == "$source_root" ]]; then
+    printf '%s' "$mount_root"
+    return 0
+  fi
+
+  prefix="$source_root/"
+  if [[ "$path" == "$prefix"* ]]; then
+    rel="${path#"$prefix"}"
+    printf '%s/%s' "$mount_root" "$rel"
+    return 0
+  fi
+
+  printf '%s' "$path"
+}
+
+translate_container_path_for_host() {
+  local path="$1"
+  local source_root="${ALINT_HOST_POSIX_SOURCE_ROOT:-/}"
+  local mount_root="${ALINT_HOST_POSIX_MOUNT_ROOT:-/host/root}"
+  local prefix
+  local rel
+
+  [[ "$path" == /* ]] || {
+    printf '%s' "$path"
+    return 0
+  }
+  [[ -n "$source_root" && -n "$mount_root" ]] || {
+    printf '%s' "$path"
+    return 0
+  }
+
+  source_root="$(trim_trailing_slash "$source_root")"
+  mount_root="$(trim_trailing_slash "$mount_root")"
+  [[ "$source_root" == /* && "$mount_root" == /* ]] || {
+    printf '%s' "$path"
+    return 0
+  }
+
+  if [[ "$path" == "$mount_root" ]]; then
+    printf '%s' "$source_root"
+    return 0
+  fi
+
+  prefix="$mount_root/"
+  if [[ "$path" == "$prefix"* ]]; then
+    rel="${path#"$prefix"}"
+    if [[ "$source_root" == "/" ]]; then
+      printf '/%s' "$rel"
+    else
+      printf '%s/%s' "$source_root" "$rel"
+    fi
+    return 0
+  fi
+
+  printf '%s' "$path"
+}
+
+decode_mountinfo_path() {
+  local path="$1"
+
+  path=${path//\\040/ }
+  path=${path//\\011/$'\t'}
+  path=${path//\\012/$'\n'}
+  path=${path//\\134/\\}
+  printf '%s' "$path"
+}
+
+mountinfo_host_path() {
+  local path="$1"
+  local line
+  local mount_root
+  local mount_point
+  local decoded_root
+  local decoded_point
+  local best_root=""
+  local best_point=""
+  local rel
+
+  [[ "$path" == /* && -r /proc/self/mountinfo ]] || {
+    printf '%s' "$path"
+    return 0
+  }
+
+  while IFS= read -r line; do
+    read -r _ _ _ mount_root mount_point _ <<<"$line"
+    decoded_root="$(decode_mountinfo_path "$mount_root")"
+    decoded_point="$(decode_mountinfo_path "$mount_point")"
+    if [[ "$path" == "$decoded_point" || "$path" == "$decoded_point"/* ]]; then
+      if [[ "${#decoded_point}" -gt "${#best_point}" ]]; then
+        best_root="$decoded_root"
+        best_point="$decoded_point"
+      fi
+    fi
+  done </proc/self/mountinfo
+
+  if [[ -z "$best_point" ]]; then
+    printf '%s' "$path"
+    return 0
+  fi
+
+  if [[ "$path" == "$best_point" ]]; then
+    printf '%s' "$best_root"
+    return 0
+  fi
+
+  rel="${path#"$best_point"/}"
+  if [[ "$best_root" == "/" ]]; then
+    printf '/%s' "$rel"
+  else
+    printf '%s/%s' "$best_root" "$rel"
+  fi
+}
+
+display_path() {
+  local path="$1"
+  local mapped
+
+  case "$path" in
+    reports/*)
+      path="$(pwd -P)/$path"
+      ;;
+    ./reports/*)
+      path="$(pwd -P)/${path#./}"
+      ;;
+  esac
+
+  mapped="$(translate_container_path_for_host "$path")"
+  if [[ "$mapped" != "$path" ]]; then
+    printf '%s' "$mapped"
+    return 0
+  fi
+
+  mountinfo_host_path "$path"
+}
+
 post_json() {
   local path="$1"
   local body="$2"
@@ -171,7 +360,7 @@ format_candidates() {
   local separator=""
 
   for candidate in "$@"; do
-    printf '%s%s' "$separator" "$candidate"
+    printf '%s%s' "$separator" "$(display_path "$candidate")"
     separator=", "
   done
   return 0
@@ -213,7 +402,7 @@ print_report_paths_from_response() {
     if [[ "$absolute_found" == "1" && "$path" != /* ]]; then
       continue
     fi
-    printf 'report: %s\n' "$path"
+    printf 'report: %s\n' "$(display_path "$path")"
   done
 }
 
@@ -363,8 +552,8 @@ start_job() {
 
   printf '\n[%s/%s] %s\n' "$((index + 1))" "$task_count" "$stem"
   printf 'thread_id: %s\n' "$thread_id"
-  printf 'lint: %s\n' "$csv_path"
-  printf 'source: %s\n' "$source_path"
+  printf 'lint: %s\n' "$(display_path "$csv_path")"
+  printf 'source: %s\n' "$(display_path "$source_path")"
 
   thread_body="$(build_thread_json "$thread_id" "$user_id" "$authenticated")"
   if ! post_json "/threads" "$thread_body" 30 >/dev/null; then
@@ -406,7 +595,7 @@ finalize_done_jobs() {
     finalized_any=0
 
     if [[ "$status" != "0" ]]; then
-      warn "agent run failed for ${submitted_stems[index]}. Response log: ${job_response_files[index]}"
+      warn "agent run failed for ${submitted_stems[index]}. Response log: $(display_path "${job_response_files[index]}")"
       cancel_thread_run "${submitted_thread_ids[index]}"
       failure_count=$((failure_count + 1))
       continue
@@ -415,15 +604,15 @@ finalize_done_jobs() {
     response_file="${job_response_files[index]}"
     if grep -q '"__interrupt__"' "$response_file"; then
       warn "agent returned a tool-approval interrupt for ${submitted_stems[index]}. Disable AGENT_TOOL_APPROVAL_ENABLED for batch mode or use the Python CLI with --auto-approve."
-      warn "response log: $response_file"
+      warn "response log: $(display_path "$response_file")"
       failure_count=$((failure_count + 1))
       continue
     fi
 
     printf '\ncompleted: %s\n' "${submitted_stems[index]}"
-    printf 'assistant response saved: %s\n' "$response_file"
+    printf 'assistant response saved: %s\n' "$(display_path "$response_file")"
     if ! print_report_paths_from_response "$response_file"; then
-      warn "could not find output CSV path for ${submitted_stems[index]}. Response log: $response_file"
+      warn "could not find output CSV path for ${submitted_stems[index]}. Response log: $(display_path "$response_file")"
     fi
     success_count=$((success_count + 1))
   done
@@ -456,9 +645,13 @@ if [[ "$input_dir" == "~" ]]; then
 elif [[ "$input_dir" == \~/* ]]; then
   input_dir="${input_dir/#\~/$HOME}"
 fi
+
+input_dir="$(translate_linux_host_path_for_container "$input_dir")"
+
 [[ "$input_dir" = /* ]] || die "please enter an absolute directory path."
-[[ -d "$input_dir" ]] || die "directory does not exist: $input_dir"
+[[ -d "$input_dir" ]] || die "directory does not exist: $(display_path "$input_dir")"
 input_dir="$(cd "$input_dir" && pwd -P)"
+display_input_dir="$(display_path "$input_dir")"
 
 csv_paths=()
 source_paths=()
@@ -505,9 +698,10 @@ for item in "${ambiguous_sources[@]}"; do
 done
 
 task_count="${#csv_paths[@]}"
-[[ "$task_count" -gt 0 ]] || die "no matched lint report + source archive/directory pairs found in $input_dir."
+[[ "$task_count" -gt 0 ]] || die "no matched lint report + source archive/directory pairs found in $display_input_dir."
 
 printf '找到 %s 组同名 lint 报告和 Verilog 源码输入。\n' "$task_count"
+printf '智能体版本: %s\n' "$AGENT_DISPLAY_VERSION"
 printf '并发任务数: %s\n' "$batch_jobs"
 printf 'Agent Server: %s\n' "$LANGGRAPH_URL"
 curl -fsS --max-time 3 "${LANGGRAPH_URL%/}/ok" >/dev/null || die "Agent Server is not reachable at $LANGGRAPH_URL."
@@ -553,7 +747,7 @@ done
 wait || true
 
 printf '\n批处理完成：成功 %s，失败 %s。\n' "$success_count" "$failure_count"
-printf '响应日志目录：%s\n' "$log_dir"
+printf '响应日志目录：%s\n' "$(display_path "$log_dir")"
 
 if [[ "$failure_count" -gt 0 ]]; then
   exit 1
