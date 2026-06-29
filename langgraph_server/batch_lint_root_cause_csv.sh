@@ -524,9 +524,42 @@ copy_report_paths_to_output_dir() {
         continue
       fi
     fi
+    if ! normalize_output_report_permissions "$target"; then
+      failed=1
+      continue
+    fi
   done < <(collect_report_paths_from_response "$response_file")
 
   [[ "$found" == "1" && "$failed" == "0" ]]
+}
+
+normalize_output_report_permissions() {
+  local target="$1"
+  local target_dir
+  local dir_owner
+  local file_owner
+
+  target_dir="$(dirname "$target")"
+  dir_owner="$(stat -c '%u:%g' "$target_dir")" || {
+    warn "failed to read output directory owner: $(display_path "$target_dir")"
+    return 1
+  }
+  file_owner="$(stat -c '%u:%g' "$target")" || {
+    warn "failed to read report owner: $(display_path "$target")"
+    return 1
+  }
+
+  if [[ "$dir_owner" != "$file_owner" ]]; then
+    if ! chown "$dir_owner" "$target" 2>/dev/null; then
+      warn "failed to update report owner: $(display_path "$target")"
+      return 1
+    fi
+  fi
+
+  if ! chmod 664 "$target" 2>/dev/null; then
+    warn "failed to update report permissions: $(display_path "$target")"
+    return 1
+  fi
 }
 
 prepare_output_dir() {
@@ -784,6 +817,9 @@ require_command basename
 require_command dirname
 require_command cp
 require_command mkdir
+require_command stat
+require_command chown
+require_command chmod
 require_command sed
 require_command tr
 
