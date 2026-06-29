@@ -6,9 +6,10 @@ LANGGRAPH_ASSISTANT="${LANGGRAPH_ASSISTANT:-lint}"
 LANGGRAPH_RECURSION_LIMIT="${LANGGRAPH_RECURSION_LIMIT:-1000}"
 LINT_AGENT_BATCH_TIMEOUT="${LINT_AGENT_BATCH_TIMEOUT:-7200}"
 LINT_AGENT_BATCH_JOBS="${LINT_AGENT_BATCH_JOBS:-1}"
-AGENT_DISPLAY_VERSION="v8"
+AGENT_DISPLAY_VERSION="v9"
 
 batch_jobs="$LINT_AGENT_BATCH_JOBS"
+output_dir=""
 SOURCE_ARCHIVE_SUFFIXES=(
   ".tar.xz"
   ".tar.gz"
@@ -24,15 +25,19 @@ SOURCE_ARCHIVE_SUFFIXES=(
 )
 
 show_usage() {
-  printf '用法: %s [-j 并发数]\n' "${0##*/}"
+  printf '用法: %s [-j 并发数] [-out_dir 输出目录]\n' "${0##*/}"
   printf '智能体版本: %s\n' "$AGENT_DISPLAY_VERSION"
   printf '\n'
   printf '选项:\n'
   printf '  -j, --jobs N    同时运行的智能体分析数量，默认 1。\n'
+  printf '  -out_dir DIR    指定根因分析 CSV 输出目录；未指定时只保留 reports 默认输出。\n'
+  printf '                 同时支持 --out_dir 和 --out-dir。\n'
   printf '  -h, --help      显示帮助。\n'
   printf '\n'
   printf '源码输入:\n'
   printf '  同名源码目录，或同名 .tar/.tar.gz/.tgz/.tar.bz2/.tbz2/.tar.xz/.txz/.zip/.7z/.rar/.cab 源码包。\n'
+  printf '输出:\n'
+  printf '  reports/<项目名>_root_cause_<YYYYMMDD_HHMMSS>.csv，项目名来自同名 lint CSV 文件名。\n'
   printf '\n'
   printf '环境变量:\n'
   printf '  LANGGRAPH_URL              默认 http://127.0.0.1:2024\n'
@@ -56,6 +61,15 @@ parse_args() {
         batch_jobs="${1#*=}"
         shift
         ;;
+      -out_dir|--out_dir|--out-dir)
+        [[ $# -ge 2 ]] || die "$1 requires an absolute directory path."
+        output_dir="$2"
+        shift 2
+        ;;
+      -out_dir=*|--out_dir=*|--out-dir=*)
+        output_dir="${1#*=}"
+        shift
+        ;;
       -h|--help)
         show_usage
         exit 0
@@ -74,6 +88,14 @@ die() {
 
 warn() {
   printf 'warning: %s\n' "$*" >&2
+}
+
+safe_filename_component() {
+  local name="$1"
+
+  name="$(printf '%s' "$name" | LC_ALL=C sed -E 's/[^A-Za-z0-9._-]+/_/g; s/^_+//; s/_+$//')"
+  [[ -n "$name" ]] || name="project"
+  printf '%s' "$name"
 }
 
 require_command() {
@@ -119,6 +141,18 @@ trim_trailing_slash() {
     value="${value%/}"
   done
   printf '%s' "$value"
+}
+
+expand_home_path() {
+  local path="$1"
+
+  if [[ "$path" == "~" ]]; then
+    printf '%s' "$HOME"
+  elif [[ "$path" == \~/* ]]; then
+    printf '%s' "${path/#\~/$HOME}"
+  else
+    printf '%s' "$path"
+  fi
 }
 
 translate_linux_host_path_for_container() {
@@ -366,7 +400,7 @@ format_candidates() {
   return 0
 }
 
-print_report_paths_from_response() {
+collect_report_paths_from_response() {
   local response_file="$1"
   local path
   local existing
@@ -384,7 +418,7 @@ print_report_paths_from_response() {
     done
     [[ "$duplicate" == "1" ]] || paths+=("$path")
   done < <(
-    grep -Eao '(/[^"[:space:]\\]*/)?reports/verilog_lint_root_cause_[0-9]{8}_[0-9]{6}\.csv' "$response_file" || true
+    grep -Eao '(/[^"[:space:]\\]*/)?reports/[A-Za-z0-9._-]+_root_cause_[0-9]{8}_[0-9]{6}\.csv' "$response_file" || true
   )
 
   if [[ "${#paths[@]}" -eq 0 ]]; then
@@ -402,8 +436,108 @@ print_report_paths_from_response() {
     if [[ "$absolute_found" == "1" && "$path" != /* ]]; then
       continue
     fi
-    printf 'report: %s\n' "$(display_path "$path")"
+    printf '%s\n' "$path"
   done
+}
+
+print_report_paths_from_response() {
+  local response_file="$1"
+  local path
+  local report_path
+  local found=0
+
+  while IFS= read -r path; do
+    found=1
+    report_path="$path"
+    if [[ -n "$output_dir" ]]; then
+      report_path="$output_dir/$(basename "$path")"
+    fi
+    printf 'report: %s\n' "$(display_path "$report_path")"
+  done < <(collect_report_paths_from_response "$response_file")
+
+  [[ "$found" == "1" ]]
+}
+
+resolve_report_copy_source() {
+  local path="$1"
+  local candidate
+
+  case "$path" in
+    reports/*)
+      candidate="$(pwd -P)/$path"
+      ;;
+    ./reports/*)
+      candidate="$(pwd -P)/${path#./}"
+      ;;
+    /*)
+      candidate="$path"
+      ;;
+    *)
+      candidate="$path"
+      ;;
+  esac
+  [[ -f "$candidate" ]] && {
+    printf '%s' "$candidate"
+    return 0
+  }
+
+  candidate="$(translate_linux_host_path_for_container "$path")"
+  [[ -f "$candidate" ]] && {
+    printf '%s' "$candidate"
+    return 0
+  }
+
+  candidate="$(pwd -P)/reports/$(basename "$path")"
+  [[ -f "$candidate" ]] && {
+    printf '%s' "$candidate"
+    return 0
+  }
+
+  return 1
+}
+
+copy_report_paths_to_output_dir() {
+  local response_file="$1"
+  local path
+  local source
+  local source_abs
+  local target
+  local found=0
+  local failed=0
+
+  [[ -n "$output_dir" ]] || return 0
+
+  while IFS= read -r path; do
+    found=1
+    if ! source="$(resolve_report_copy_source "$path")"; then
+      warn "could not copy report; generated CSV is not readable: $(display_path "$path")"
+      failed=1
+      continue
+    fi
+
+    source_abs="$(cd "$(dirname "$source")" && pwd -P)/$(basename "$source")"
+    target="$output_dir/$(basename "$path")"
+    if [[ "$source_abs" != "$target" ]]; then
+      if ! cp -f "$source_abs" "$target"; then
+        warn "failed to copy report to $(display_path "$target")"
+        failed=1
+        continue
+      fi
+    fi
+  done < <(collect_report_paths_from_response "$response_file")
+
+  [[ "$found" == "1" && "$failed" == "0" ]]
+}
+
+prepare_output_dir() {
+  [[ -n "$output_dir" ]] || return 0
+
+  output_dir="$(expand_home_path "$output_dir")"
+  output_dir="$(translate_linux_host_path_for_container "$output_dir")"
+  [[ "$output_dir" = /* ]] || die "-out_dir must be an absolute directory path."
+  mkdir -p "$output_dir" || die "failed to create output directory: $(display_path "$output_dir")"
+  [[ -d "$output_dir" ]] || die "output path is not a directory: $(display_path "$output_dir")"
+  output_dir="$(cd "$output_dir" && pwd -P)"
 }
 
 cancel_run() {
@@ -540,20 +674,30 @@ start_job() {
   local response_file
   local request_file
   local status_file
+  local project_name
+  local output_csv
+  local display_output_csv
   local prompt
   local thread_body
   local run_body
 
   thread_id="$(new_uuid)"
+  project_name="$(safe_filename_component "$stem")"
+  output_csv="reports/${project_name}_root_cause_${run_stamp}.csv"
+  display_output_csv="$output_csv"
+  if [[ -n "$output_dir" ]]; then
+    display_output_csv="$output_dir/$(basename "$output_csv")"
+  fi
   response_file="$log_dir/${stem}.${thread_id}.response.json"
   request_file="$log_dir/${stem}.${thread_id}.request.json"
   status_file="$log_dir/${stem}.${thread_id}.status"
-  prompt="${csv_path} 为 lint 报告路径，${source_path} 为 Verilog 源代码包或源码目录路径，请分析这些 lint 告警的根因，生成根因分析 CSV。"
+  prompt="${csv_path} 为 lint 报告路径，${source_path} 为 Verilog 源代码包或源码目录路径，请分析这些 lint 告警的根因，生成根因分析 CSV。最终 CSV 必须写入 ${output_csv}。"
 
   printf '\n[%s/%s] %s\n' "$((index + 1))" "$task_count" "$stem"
   printf 'thread_id: %s\n' "$thread_id"
   printf 'lint: %s\n' "$(display_path "$csv_path")"
   printf 'source: %s\n' "$(display_path "$source_path")"
+  printf 'output: %s\n' "$(display_path "$display_output_csv")"
 
   thread_body="$(build_thread_json "$thread_id" "$user_id" "$authenticated")"
   if ! post_json "/threads" "$thread_body" 30 >/dev/null; then
@@ -613,6 +757,13 @@ finalize_done_jobs() {
     printf 'assistant response saved: %s\n' "$(display_path "$response_file")"
     if ! print_report_paths_from_response "$response_file"; then
       warn "could not find output CSV path for ${submitted_stems[index]}. Response log: $(display_path "$response_file")"
+      if [[ -n "$output_dir" ]]; then
+        failure_count=$((failure_count + 1))
+        continue
+      fi
+    elif ! copy_report_paths_to_output_dir "$response_file"; then
+      failure_count=$((failure_count + 1))
+      continue
     fi
     success_count=$((success_count + 1))
   done
@@ -630,22 +781,21 @@ require_command find
 require_command sort
 require_command date
 require_command basename
+require_command dirname
+require_command cp
+require_command mkdir
 require_command sed
 require_command tr
 
 [[ "$LANGGRAPH_RECURSION_LIMIT" =~ ^[0-9]+$ ]] || die "LANGGRAPH_RECURSION_LIMIT must be an integer."
 [[ "$LINT_AGENT_BATCH_TIMEOUT" =~ ^[0-9]+$ ]] || die "LINT_AGENT_BATCH_TIMEOUT must be an integer number of seconds."
 [[ "$batch_jobs" =~ ^[1-9][0-9]*$ ]] || die "--jobs must be a positive integer."
+prepare_output_dir
 
 printf '请输入源码包/源码目录和 lint 报告所在文件夹绝对路径: '
 IFS= read -r input_dir || die "failed to read input directory."
 
-if [[ "$input_dir" == "~" ]]; then
-  input_dir="$HOME"
-elif [[ "$input_dir" == \~/* ]]; then
-  input_dir="${input_dir/#\~/$HOME}"
-fi
-
+input_dir="$(expand_home_path "$input_dir")"
 input_dir="$(translate_linux_host_path_for_container "$input_dir")"
 
 [[ "$input_dir" = /* ]] || die "please enter an absolute directory path."

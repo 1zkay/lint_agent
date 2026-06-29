@@ -4,7 +4,7 @@ description: Use this skill when the user provides a Verilog/SystemVerilog lint 
 license: MIT
 metadata:
   author: zk
-  version: "1.5"
+  version: "1.6"
 ---
 
 # Verilog Lint Root-Cause CSV
@@ -138,8 +138,13 @@ Read the printed `WORK_DIR`, `NORMALIZED_LINT_REPORT_CSV`, `LINT_ITEMS_CSV`, `LI
 Unless the user gives an explicit output path, write:
 
 ```text
-reports/verilog_lint_root_cause_<YYYYMMDD_HHMMSS>.csv
+reports/<project_name>_root_cause_<YYYYMMDD_HHMMSS>.csv
 ```
+
+`<project_name>` must come from the input lint report filename without its
+`.csv` suffix. If the filename contains characters outside `A-Z`, `a-z`,
+`0-9`, `.`, `_`, or `-`, replace each run of those characters with `_` and trim
+leading or trailing `_`; if the result is empty, use `project`.
 
 The timestamp must come from an executed command in the current environment.
 
