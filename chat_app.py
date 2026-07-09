@@ -75,6 +75,10 @@ from app.chainlit_streaming import (
     sync_todos_to_tasklist as _sync_todos_to_tasklist,
     tool_call_summary as _tool_call_summary,
     tool_input_for_step as _tool_input_for_step,
+    token_usage_from_message as _token_usage_from_message,
+    token_usage_generation as _token_usage_generation,
+    token_usage_summary as _token_usage_summary,
+    token_usage_total as _token_usage_total,
     update_preview as _update_preview,
 )
 from app.chainlit_runtime import (
@@ -251,6 +255,7 @@ async def on_message(message: cl.Message):
     llm_output_by_node: dict[str, str] = {}
     _model_text_buffer: str = ""       # 当前轮缓冲，确认无真实工具调用后写入 response_msg
     _write_todos_text_fallback: str = ""  # write_todos 同轮文字，用于后续空终止轮兜底
+    _reported_usage_message_keys: set[str] = set()
 
     async def _ensure_llm_step(node_name: str) -> cl.Step:
         llm_step = llm_step_by_node.get(node_name)
@@ -261,6 +266,36 @@ async def on_message(message: cl.Message):
         llm_step_by_node[node_name] = llm_step
         llm_output_by_node[node_name] = ""
         return llm_step
+
+    def _usage_message_key(message: Any) -> str:
+        message_id = str(getattr(message, "id", "") or "").strip()
+        if message_id:
+            return message_id
+        return f"{type(message).__name__}:{id(message)}"
+
+    def _append_usage_summary(text: str, usage_summary: str) -> str:
+        if not usage_summary or usage_summary in text:
+            return text
+        return f"{text}\n\n{usage_summary}" if text else usage_summary
+
+    async def _record_message_token_usage(message: Any) -> tuple[Any | None, str]:
+        usage = _token_usage_from_message(message)
+        if not usage:
+            return None, ""
+
+        key = _usage_message_key(message)
+        if key not in _reported_usage_message_keys:
+            _reported_usage_message_keys.add(key)
+            total_tokens = _token_usage_total(usage)
+            if total_tokens is not None:
+                try:
+                    maybe_awaitable = cl.context.emitter.update_token_count(total_tokens)
+                    if hasattr(maybe_awaitable, "__await__"):
+                        await maybe_awaitable
+                except Exception as exc:
+                    logger.debug("[chat_app] Chainlit token usage update failed: %s", exc)
+
+        return _token_usage_generation(message, usage), _token_usage_summary(usage)
 
     async def _consume_v3_message_stream(message_stream: Any) -> None:
         nonlocal _model_text_buffer
@@ -408,6 +443,15 @@ async def on_message(message: cl.Message):
                         continue
                     output_buffer += token_text
                     await step.stream_token(token_text)
+                try:
+                    output_message = await message_stream.output
+                except Exception:
+                    continue
+                usage_generation, usage_summary = await _record_message_token_usage(output_message)
+                if usage_generation is not None:
+                    step.generation = usage_generation
+                if usage_summary:
+                    output_buffer = _append_usage_summary(output_buffer, usage_summary)
 
         async def _consume_subagent_tool_calls() -> None:
             tool_calls = getattr(subagent_stream, "tool_calls", None)
@@ -490,17 +534,28 @@ async def on_message(message: cl.Message):
 
             msgs = update.get("messages")
             last_msg = msgs[-1] if msgs else None
+            usage_generation = None
+            usage_summary = ""
+            if last_msg is not None:
+                usage_generation, usage_summary = await _record_message_token_usage(last_msg)
 
             llm_step = llm_step_by_node.pop(source, None)
             if llm_step:
+                if usage_generation is not None:
+                    llm_step.generation = usage_generation
+
                 llm_output = llm_output_by_node.pop(source, "")
                 summary = llm_output
                 if last_msg is not None and not summary:
                     summary = _message_preview(last_msg) or _tool_call_summary(
                         _message_tool_calls(last_msg)
                     )
+                if usage_summary:
+                    summary = _append_usage_summary(summary, usage_summary)
                 if summary and not llm_output:
                     llm_step.output = summary
+                elif usage_summary:
+                    llm_step.output = _append_usage_summary(llm_step.output or "", usage_summary)
                 await llm_step.update()
                 if source not in {"model", "tools"}:
                     continue

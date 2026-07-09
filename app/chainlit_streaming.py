@@ -69,6 +69,115 @@ def message_preview(message: Any) -> str:
     return message_text(message)[:10000]
 
 
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return None
+
+
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _first_int(*values: Any) -> int | None:
+    for value in values:
+        parsed = _int_or_none(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def token_usage_from_message(message: Any) -> dict[str, Any] | None:
+    """Extract provider-reported token usage from a LangChain message."""
+    usage = _dict_or_empty(getattr(message, "usage_metadata", None))
+    response_metadata = _dict_or_empty(getattr(message, "response_metadata", None))
+    token_usage = _dict_or_empty(response_metadata.get("token_usage"))
+    if not usage and not token_usage:
+        return None
+
+    input_tokens = _first_int(usage.get("input_tokens"), token_usage.get("prompt_tokens"))
+    output_tokens = _first_int(usage.get("output_tokens"), token_usage.get("completion_tokens"))
+    total_tokens = _first_int(usage.get("total_tokens"), token_usage.get("total_tokens"))
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+
+    input_details = _dict_or_empty(usage.get("input_token_details"))
+    output_details = _dict_or_empty(usage.get("output_token_details"))
+    prompt_details = _dict_or_empty(token_usage.get("prompt_tokens_details"))
+    completion_details = _dict_or_empty(token_usage.get("completion_tokens_details"))
+
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "cache_read_tokens": _first_int(
+            input_details.get("cache_read"),
+            prompt_details.get("cached_tokens"),
+            token_usage.get("prompt_cache_hit_tokens"),
+        ),
+        "reasoning_tokens": _first_int(
+            output_details.get("reasoning"),
+            completion_details.get("reasoning_tokens"),
+        ),
+        "usage_metadata": usage,
+        "token_usage": token_usage,
+    }
+
+
+def token_usage_total(usage: dict[str, Any] | None) -> int | None:
+    if not usage:
+        return None
+    return _int_or_none(usage.get("total_tokens"))
+
+
+def token_usage_summary(usage: dict[str, Any] | None) -> str:
+    if not usage:
+        return ""
+
+    parts = []
+    for label, key in [
+        ("total", "total_tokens"),
+        ("input", "input_tokens"),
+        ("output", "output_tokens"),
+        ("cache_read", "cache_read_tokens"),
+        ("reasoning", "reasoning_tokens"),
+    ]:
+        value = _int_or_none(usage.get(key))
+        if value is not None:
+            parts.append(f"{label}={value}")
+    return "Token usage: " + ", ".join(parts) if parts else ""
+
+
+def token_usage_generation(message: Any, usage: dict[str, Any] | None):
+    """Build Chainlit's standard generation object from message usage."""
+    if not usage:
+        return None
+
+    response_metadata = _dict_or_empty(getattr(message, "response_metadata", None))
+    metadata = {}
+    if usage.get("usage_metadata"):
+        metadata["usage_metadata"] = usage["usage_metadata"]
+    if usage.get("token_usage"):
+        metadata["token_usage"] = usage["token_usage"]
+
+    return cl.ChatGeneration(
+        provider=response_metadata.get("model_provider"),
+        model=response_metadata.get("model_name"),
+        token_count=_int_or_none(usage.get("total_tokens")),
+        input_token_count=_int_or_none(usage.get("input_tokens")),
+        output_token_count=_int_or_none(usage.get("output_tokens")),
+        metadata=metadata,
+        message_completion=cl.GenerationMessage(
+            role="assistant",
+            content=message_preview(message),
+        ),
+    )
+
+
 def tool_call_summary(tool_calls: Any) -> str:
     if not isinstance(tool_calls, list):
         return ""
