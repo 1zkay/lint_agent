@@ -76,12 +76,13 @@ def build_root_cause_workflow_tool(
             "provides a source archive or source directory and its corresponding "
             "lint CSV. Use it for full report generation, not for general questions."
         ),
+        response_format="content_and_artifact",
     )
     async def run_lint_root_cause_workflow(
         source_path: str,
         lint_csv_path: str,
         runtime: ToolRuntime[AgentContext],
-    ) -> dict[str, str]:
+    ) -> tuple[dict[str, str], dict[str, str]]:
         workflow = build_root_cause_workflow(
             llm,
             base_tools,
@@ -97,6 +98,7 @@ def build_root_cause_workflow_tool(
             config=runtime.config,
             context=runtime.context or AgentContext(),
         )
-        return {"report_path": str(result["report_path"])}
+        report = {"report_path": str(result["report_path"])}
+        return report, report
 
     return run_lint_root_cause_workflow

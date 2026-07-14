@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import stat
 import tempfile
 from pathlib import Path
 
@@ -61,6 +62,7 @@ def sort_csv(input_csv: Path, output_csv: Path) -> None:
 
 
 def sort_csv_in_place(input_csv: Path) -> None:
+    input_mode = stat.S_IMODE(input_csv.stat().st_mode)
     with tempfile.NamedTemporaryFile(
         "w",
         encoding="utf-8",
@@ -73,6 +75,7 @@ def sort_csv_in_place(input_csv: Path) -> None:
         tmp_path = Path(tmp.name)
     try:
         sort_csv(input_csv, tmp_path)
+        tmp_path.chmod(input_mode)
         tmp_path.replace(input_csv)
     except Exception:
         tmp_path.unlink(missing_ok=True)

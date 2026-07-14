@@ -6,7 +6,7 @@ LANGGRAPH_ASSISTANT="${LANGGRAPH_ASSISTANT:-lint}"
 LANGGRAPH_RECURSION_LIMIT="${LANGGRAPH_RECURSION_LIMIT:-1000}"
 LINT_AGENT_BATCH_TIMEOUT="${LINT_AGENT_BATCH_TIMEOUT:-7200}"
 LINT_AGENT_BATCH_JOBS="${LINT_AGENT_BATCH_JOBS:-1}"
-AGENT_DISPLAY_VERSION="v9"
+AGENT_DISPLAY_VERSION="v10"
 
 batch_jobs="$LINT_AGENT_BATCH_JOBS"
 output_dir=""
@@ -88,14 +88,6 @@ die() {
 
 warn() {
   printf 'warning: %s\n' "$*" >&2
-}
-
-safe_filename_component() {
-  local name="$1"
-
-  name="$(printf '%s' "$name" | LC_ALL=C sed -E 's/[^A-Za-z0-9._-]+/_/g; s/^_+//; s/_+$//')"
-  [[ -n "$name" ]] || name="project"
-  printf '%s' "$name"
 }
 
 require_command() {
@@ -707,30 +699,20 @@ start_job() {
   local response_file
   local request_file
   local status_file
-  local project_name
-  local output_csv
-  local display_output_csv
   local prompt
   local thread_body
   local run_body
 
   thread_id="$(new_uuid)"
-  project_name="$(safe_filename_component "$stem")"
-  output_csv="reports/${project_name}_root_cause_${run_stamp}.csv"
-  display_output_csv="$output_csv"
-  if [[ -n "$output_dir" ]]; then
-    display_output_csv="$output_dir/$(basename "$output_csv")"
-  fi
   response_file="$log_dir/${stem}.${thread_id}.response.json"
   request_file="$log_dir/${stem}.${thread_id}.request.json"
   status_file="$log_dir/${stem}.${thread_id}.status"
-  prompt="${csv_path} 为 lint 报告路径，${source_path} 为 Verilog 源代码包或源码目录路径，请分析这些 lint 告警的根因，生成根因分析 CSV。最终 CSV 必须写入 ${output_csv}。"
+  prompt="${csv_path} 为 lint 报告路径，${source_path} 为 Verilog 源代码包或源码目录路径，运行根因分析工作流，生成根因分析 CSV。"
 
   printf '\n[%s/%s] %s\n' "$((index + 1))" "$task_count" "$stem"
   printf 'thread_id: %s\n' "$thread_id"
   printf 'lint: %s\n' "$(display_path "$csv_path")"
   printf 'source: %s\n' "$(display_path "$source_path")"
-  printf 'output: %s\n' "$(display_path "$display_output_csv")"
 
   thread_body="$(build_thread_json "$thread_id" "$user_id" "$authenticated")"
   if ! post_json "/threads" "$thread_body" 30 >/dev/null; then

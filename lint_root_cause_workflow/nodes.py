@@ -231,6 +231,7 @@ class WorkflowNodes:
         if report_path.is_file():
             validation = await self._validate_report(report_path, state["slices_dir"])
             if validation.returncode == 0:
+                report_path.chmod(0o644)
                 return {
                     "validation_error": "",
                     "report_path": str(report_path),
@@ -275,6 +276,7 @@ class WorkflowNodes:
 
         report_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(draft_csv, report_path)
+        report_path.chmod(0o644)
         return {
             "validation_error": "",
             "report_path": str(report_path),

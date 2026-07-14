@@ -31,6 +31,7 @@ import hmac
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -92,10 +93,49 @@ from agent_runtime.message_types import (
     message_text as _message_text,
     message_tool_calls as _message_tool_calls,
 )
+from agent_runtime.root_cause import ROOT_CAUSE_WORKFLOW_TOOL_NAME
 from config import config
 
 logger = logging.getLogger(__name__)
 SUBAGENT_DISPATCH_TOOL_NAMES = {"task"}
+
+
+def _root_cause_report_path(tool_name: str, output: Any) -> Path | None:
+    if tool_name != ROOT_CAUSE_WORKFLOW_TOOL_NAME:
+        return None
+
+    artifact = getattr(output, "artifact", None)
+    if not isinstance(artifact, Mapping):
+        return None
+
+    report_path = str(artifact.get("report_path") or "").strip()
+    if not report_path:
+        return None
+
+    candidate = Path(report_path).resolve()
+    reports_root = (PROJECT_ROOT / "reports").resolve()
+    try:
+        candidate.relative_to(reports_root)
+    except ValueError:
+        return None
+    if candidate.suffix.lower() != ".csv" or not candidate.is_file():
+        return None
+    return candidate
+
+
+async def _send_root_cause_report(report_path: Path) -> None:
+    await cl.Message(
+        content="根因分析报告已生成。",
+        elements=[
+            cl.File(
+                name=report_path.name,
+                path=str(report_path),
+                display="inline",
+                mime="text/csv",
+            )
+        ],
+    ).send()
+
 
 if config.chainlit_enable_password_auth:
     @cl.password_auth_callback
@@ -410,6 +450,9 @@ async def on_message(message: cl.Message):
                 output_text = _message_text(output) or (str(output) if output is not None else "")
                 if output_text:
                     step.output = output_text[:output_limit]
+                report_path = _root_cause_report_path(tool_name, output)
+                if report_path is not None:
+                    await _send_root_cause_report(report_path)
         finally:
             if step_sent:
                 try:
