@@ -1,189 +1,173 @@
 ---
 name: verilog-lint-root-cause-csv
-description: Use this skill when the user provides a Verilog/SystemVerilog lint report in either normalized violation_id/severity/message_id/description/file_path/line_number format or legacy Stage/MessageID/Severity/Contents/LineNo format, plus source files or a source archive, and wants a root-cause CSV whose columns describe root causes, fix suggestions, source ranges, parent root IDs, and leaf violation IDs.
-license: MIT
-metadata:
-  author: zk
-  version: "1.6"
+description: Use for cross-level Verilog lint root-cause analysis from prepared RTL, slices, and filelist inputs.
 ---
 
 # Verilog Lint Root-Cause CSV
 
-## When to Use
+## Input
 
-- The user provides one lint report and one or more Verilog/SystemVerilog files, directories, or source archives.
-- The lint report must use exactly one of these two schemas.
+Require these three prepared design-evidence paths:
 
-Normalized schema:
+- the `rtl/` source directory;
+- the `slices/` directory;
+- the project `filelist.f`.
+
+Also require one exact draft CSV output path from the outer workflow. Treat it
+as an output target, not as design evidence.
+
+Do not read the original source archive, original lint CSV, hierarchy work
+directory, or slice policy. Do not preprocess inputs, classify modules, build
+slices, sort, validate, publish, or create timestamped reports. The outer
+workflow owns those operations.
+
+## Analyze
+
+Read `slices/coverage.json` first. Then process the exclusive lint scopes in
+this order without merging their `lint.csv` files:
 
 ```text
-violation_id,severity,message_id,description,file_path,line_number
+level1 -> level2 -> level3 -> level4 -> isolated
 ```
 
-After preparation, `violation_id` values must be normalized in input row order
-as `vio_001`, `vio_002`, `vio_003`, and so on. This is the canonical input
-format used by downstream analysis, regardless of whether the original report
-used numeric IDs, different IDs, or legacy rows without IDs.
+For each scope:
 
-Legacy schema:
+- use `context.json` for module source paths, parameters, ports, and child
+  instances;
+- use `lint.csv` for exclusively owned alerts;
+- use the project `filelist.f` for compile order and macros;
+- use `slices/hierarchy_tree.txt` for active instance context;
+- for every lint row, open `rtl/<source_file>` at `source_line` and inspect the
+  relevant enclosing construct before assigning its root cause, grouping, fix,
+  or false-positive status;
+- never make any decision from `message_id` or `contents` alone; if the
+  corresponding source and relevant context have not been inspected, do not
+  finalize that row;
+- treat a semicolon-separated `hierarchy` field as equivalent instances of one
+  source warning, not as multiple leaf violations;
+- analyze isolated rows against their source and child instances; absence from
+  the active hierarchy alone does not prove a false positive.
+
+After completing each scope, write its analyzed rows into the one supplied
+draft while retaining all rows from earlier scopes. Do not create separate
+per-scope reports. After all five scopes are present, consolidate that same
+draft into the global result: merge cross-level rows when they share the same
+defect mechanism and concrete repair strategy, make their category fields
+consistent, and keep every leaf row exactly once.
+
+Treat a lint finding as a false positive when the reported code is intentional,
+conforms to the project design intent, and requires no RTL change. A rule may
+correctly recognize a code pattern and still be a false positive when it cannot
+account for that design intent. If the RTL requires a change, use a normal root;
+if the design intent cannot be confirmed, continue the analysis instead of
+marking the finding as a false positive.
+
+Maintain one global defect-class view across every scope. Assign the same
+`root_id` when findings share the same underlying defect mechanism and can be
+resolved by the same concrete repair strategy:
+
+- findings do not need to occur at the same source location or be cleared by
+  one source edit;
+- do not group findings only because they share a level, lint rule, or generic
+  repair wording;
+- keep findings separate when their defect mechanisms or required repairs
+  differ, even if they share the same lint rule;
+- allow findings from different rules or levels to share one root when both
+  their defect mechanism and concrete repair strategy match.
+
+### Derived roots
+
+Use `parent_root_id` only to record direct causal dependence between two
+distinct normal roots. Treat a root as derived only when source, hierarchy, or
+signal-flow evidence shows that the parent defect causes or enables the child
+defect, while the child still has a different defect mechanism or requires a
+different concrete repair.
+
+Apply these rules:
+
+- if two findings share both mechanism and repair, merge them under one
+  `root_id` instead of creating a parent-child pair;
+- if repairing the parent completely removes a downstream finding and no
+  separate child repair remains, assign that finding to the parent root;
+- make every child point to its nearest direct parent, not a remote ancestor;
+- require both parent and child to be normal roots backed by at least one lint
+  row; never invent an empty parent root and never attach `误报` to a parent;
+- when several roots are merely related, correlated, or in the same module,
+  level, rule, or signal path, keep `parent_root_id=/` unless one direct causal
+  direction is supported;
+- when more than one possible parent exists but no single direct parent can be
+  established, use `/` rather than guessing;
+- allow a confirmed parent-child relationship to cross slice levels, and
+  resolve it during global consolidation;
+- state the child's local mechanism and its causal link to the parent in
+  `root_note`; state the child-specific repair and any required repair order in
+  `fix_suggestion`.
+
+For example, violations caused directly by one combinationally generated clock
+and cleared by replacing it with a clock enable belong to one root. Create a
+derived child only if a separate downstream clock-generation construct is
+caused by that root and still requires its own RTL change; point that child to
+the generated-clock root.
+
+Map leaf fields directly from each scope `lint.csv`:
 
 ```text
-Stage,MessageID,Severity,Contents,LineNo,
+leaf_violation_id   = vio_id
+leaf_violation_note = message_id:contents
 ```
 
-- The requested output is a root-cause CSV that groups leaf lint violations by root cause and records fix guidance, source ranges, and parent-root relationships.
+Preserve `message_id` and `contents` exactly.
 
-## Terminology and Grouping Policy
+## Write the draft
 
-- `rule`: a lint check rule, identified by `message_id`.
-- `violation` or `message`: one concrete lint report emitted by a rule. It carries the concrete file, line number, object, and diagnostic text.
-- `category`: a common potential error behavior. In business terms, a category may correspond to one rule, several rules, or no direct rule.
-- `group`: a set of violations grouped by one chosen feature.
-- `group by root cause`: group violations whose root cause is the same source-code location or source-code range. This is the target grouping method for this skill.
-- `group by fixing pattern`: group violations that can be fixed or waived with a similar method. This is useful only after designer confirmation for repair automation, and is not the target of this skill.
-
-Use `group by root cause`, not `group by fixing pattern`.
-
-- A valid root-cause group should let the designer fix one concrete source location or range and clear all violations in that group.
-- Acceptance criterion: applying the group's `fix_suggestion` to that one source location or range should clear all violations in this group, and should not be required to clear unrelated groups.
-- If two violations need similar fixes but come from different source locations or different independent source constructs, they must use different `root_id` values.
-- If one source construct or source mistake triggers multiple rules, categories, or diagnostic messages, those leaf violations should share one `root_id`.
-- `fix_suggestion` describes how to fix the identified root cause. It must not be used as the grouping key.
-
-## Output Schema
-
-Write exactly these columns, in this order:
+Write or revise only the exact draft path supplied by the outer workflow. Keep
+the same path throughout all revisions. Write exactly these columns in order:
 
 ```text
 root_id,root_note,fix_suggestion,root_file_path,root_file_start,root_file_end,parent_root_id,leaf_violation_id,leaf_violation_note
 ```
 
-Rules:
+Apply these rules:
 
-- `root_id`: stable root-cause ID such as `root_001`. Reuse the same `root_id` for all leaf violations caused by the same source issue. For a confirmed false positive, write the literal value `误报`.
-- `root_note`: concise Chinese explanation of the concrete root cause.
-- `fix_suggestion`: concrete Chinese fix for the root cause. For a confirmed false positive, write `/`.
-- `root_file_path`: source filename containing the concrete root cause, such as `temp.v`. Use only the filename, not an absolute path.
-- `root_file_start`: 1-based inclusive start line of the root-cause range.
-- `root_file_end`: 1-based inclusive end line of the root-cause range. For a single-line cause, make it equal to `root_file_start`.
-- `parent_root_id`: `/` for a top-level root cause, another `root_id` when this row's root is derived from that parent root, or `/` for a confirmed false positive.
-- `leaf_violation_id`: one normalized input `violation_id`, such as `vio_001`.
-- `leaf_violation_note`: write the corresponding `message_id:description` from `normalized_lint_report.csv`, such as `LatchIsInferred:Latch is inferred for signal 'o1'`. Copy both `message_id` and `description` exactly, joined by one literal colon. Do not summarize, translate, or replace it with a fix note.
-- If a copied `description` contains commas, quotes, or newlines, preserve the whole `message_id:description` value as one `leaf_violation_note` cell using standard CSV quoting and escaping. Do not split, rewrite, or drop characters to avoid quoting.
-- Write one output row per input lint violation. If several violations share the same root cause, repeat the same root fields and use one `leaf_violation_id` per row.
-- Do not combine multiple leaf IDs in one cell. Do not add severity, message ID, prose analysis columns, grouped-ID columns, or any extra columns.
-- Keep every repeated `root_id` internally consistent: the same `root_note`, `fix_suggestion`, source range, and `parent_root_id` must be used on each row for that root.
-- `root_id=误报` is a special marker, not a shared root-cause group. Multiple false-positive rows may all use `误报` with different `root_note` values.
-- Keep the CSV header and structural IDs in English exactly as specified. Write analysis-authored natural-language values such as `root_note` and `fix_suggestion` in Chinese. `leaf_violation_note` is source data copied from the normalized lint report and may retain the lint tool's original language. Keep code identifiers, signal names, module names, file paths, rule/message IDs, violation IDs, and Verilog literals unchanged.
-- Write the CSV as UTF-8. A BOM is allowed but not required.
+- write one output row for every lint row and exactly one leaf ID per row;
+- use stable normal IDs such as `root_001`;
+- repeat identical `root_note`, `fix_suggestion`, and `parent_root_id` values on
+  every row sharing a normal root ID;
+- write `root_note` and `fix_suggestion` in concise Chinese;
+- use the exact POSIX path relative to the supplied `rtl/` directory for
+  `root_file_path` (for example, `core/a/foo.v`) and record the concrete defect
+  occurrence for that leaf; never collapse nested paths to a basename;
+- use 1-based inclusive line bounds for that occurrence that do not exceed the
+  source file; rows sharing a root ID may have different occurrence paths and
+  ranges;
+- use `/` for an independent root's `parent_root_id`;
+- for a false positive, use `root_id=误报`, explain in `root_note` why the
+  code is intentional and needs no RTL change, and use `/` for
+  `fix_suggestion` and `parent_root_id`;
+- preserve commas, quotes, and newlines with standard CSV quoting;
+- do not add columns or combine leaf IDs.
 
-For example:
+## Review
 
-```text
-root_id,root_note,fix_suggestion,root_file_path,root_file_start,root_file_end,parent_root_id,leaf_violation_id,leaf_violation_note
-root_001,mem数组被读取但没有任何写入或初始化,为mem添加明确的写入逻辑或初始化,temp.v,6,6,/,vio_008,VarReadBeforeSet:The variable 'mem' is read before it is set
-root_002,case分支没有在所有路径上为每个输出赋值,在case前设置默认值或在每个分支中完整赋值,temp.v,10,14,/,vio_013,LatchIsInferred:Latch is inferred for signal 'o1'
-root_003,由root_002推断锁存器后派生出的gated clock告警,先修复root_002；该派生告警应随锁存器消除而消失,temp.v,10,14,root_002,vio_021,LatchGatedClock:The latch inferred for 'o1' is used as a gated clock
-误报,该unloaded net是同一时序更新内部使用的临时信号，不构成功能问题,/,temp.v,18,18,/,vio_022,DrivenNetUnloaded:The driven net 'tmp' is unloaded in the design
-```
+Before finishing, perform a second source-based pass over every draft row. For
+each row, locate its original entry in the corresponding scope `lint.csv`,
+reopen `rtl/<source_file>` at `source_line`, inspect the relevant enclosing
+construct, and reopen the recorded `root_file_path` and root range when they
+differ from the leaf location. Never approve a row from the lint text or draft
+text alone. Confirm:
 
-## Workflow
+- every `vio_id` occurs exactly once and both leaf fields are exact;
+- every normal root groups one defect mechanism and one concrete repair
+  strategy, while each row records its own valid occurrence location;
+- every derived root has source-backed direct causality, remains distinct from
+  its parent under the grouping rules, and points to the nearest existing
+  parent;
+- every false-positive decision is supported by reopened source and context
+  showing that the code is intentional, conforms to project design intent, and
+  requires no RTL change;
+- repeated normal roots have consistent category fields and every parent root
+  exists;
+- the schema is unchanged and authored natural-language fields are Chinese.
 
-### 1. Prepare deterministic inputs
-
-Do not parse original reports manually in the analysis workflow. Always run the
-helper below first, and treat its generated `normalized_lint_report.csv`,
-`lint_items.csv`, `lint_items.json`, and `SOURCE_ROOT` as the authoritative
-inputs for root-cause analysis. Unsupported report headers or malformed rows
-must fail in the helper instead of being interpreted heuristically.
-The helper also handles the known legacy ALINT row defect where `LineNo` is
-tab-appended to `Contents` while the header remains `Stage,MessageID,Severity,Contents,LineNo,`.
-The helper rewrites the first column of the normalized lint report to
-`vio_001`, `vio_002`, `vio_003`, ... in row order.
-
-Run the helper from the `lint_agent` project root:
-
-```bash
-python skills/verilog-lint-root-cause-csv/scripts/prepare_root_cause_inputs.py \
-  --lint-report <lint_report.csv> \
-  --source-archive <sources.tar.xz>
-```
-
-For source directories instead of archives, use:
-
-```bash
-python skills/verilog-lint-root-cause-csv/scripts/prepare_root_cause_inputs.py \
-  --lint-report <lint_report.csv> \
-  --source-dir <source_dir>
-```
-
-Read the printed `WORK_DIR`, `NORMALIZED_LINT_REPORT_CSV`, `LINT_ITEMS_CSV`, `LINT_ITEMS_JSON`, and `SOURCE_ROOT` paths. Do not guess them.
-
-### 2. Analyze root causes
-
-- Read `normalized_lint_report.csv` first. It has the same schema as the normalized input example: `violation_id,severity,message_id,description,file_path,line_number`, with `violation_id` values normalized to `vio_<number>`.
-- Then read `lint_items.csv` if you need helper metadata such as original report line number or original source path.
-- Inspect the referenced source files around candidate cause lines.
-- For each violation, identify the smallest source range that explains the reported effect.
-- If several lint rows are different effects of the same source construct, assign them the same `root_id` and repeat the same root fields.
-- Do not group rows only because their fixes look similar. Similar fixes at independent source locations are separate root-cause groups.
-- Before finalizing each repeated `root_id`, check the one-fix acceptance criterion: one source edit at the recorded root range should clear that group's leaf violations, while unrelated groups remain independent.
-- Use `parent_root_id` only for a real derived relationship. Use `/` for independent top-level roots.
-- If a lint row is a confirmed false positive, still emit one row for that leaf: set `root_id` to `误报`, put the false-positive reason in `root_note` rather than `/`, set `fix_suggestion` and `parent_root_id` to `/`, fill `leaf_violation_id` with the normalized `violation_id`, and fill `leaf_violation_note` as `message_id:description`.
-- If a lint row is policy-only but not a false positive, keep a normal `root_<number>` ID and explain the policy rationale and fix or waiver suggestion in the normal fields.
-- Prefer concise, code-evidenced ranges. For example, if a case item and its assignments are the root cause, the range should cover that case statement or the offending assignment block rather than the whole file.
-
-### 3. Write the CSV
-
-Unless the user gives an explicit output path, write:
-
-```text
-reports/<project_name>_root_cause_<YYYYMMDD_HHMMSS>.csv
-```
-
-`<project_name>` must come from the input lint report filename without its
-`.csv` suffix. If the filename contains characters outside `A-Z`, `a-z`,
-`0-9`, `.`, `_`, or `-`, replace each run of those characters with `_` and trim
-leading or trailing `_`; if the result is empty, use `project`.
-
-The timestamp must come from an executed command in the current environment.
-
-### 4. Second-pass review
-
-After writing the first CSV draft, perform a full second-pass review before
-validation:
-
-- Re-read every CSV row and the corresponding lint item from `lint_items.csv`.
-- Re-open the relevant source code ranges for rows that are broad, style-only, tool-policy-only, or based on a lint message that may not be a functional defect.
-- Ensure every input `violation_id` appears exactly once as `leaf_violation_id`.
-- Ensure every `leaf_violation_note` exactly matches `message_id:description` from the corresponding normalized lint row.
-- Keep repeated normal `root_<number>` values consistent and make derived roots point to an existing parent root. Do not apply normal root consistency to `root_id=误报`.
-- Keep the CSV schema unchanged: no comments, no analysis columns, and no grouped ID cells.
-- Ensure `root_note` and `fix_suggestion` use Chinese natural-language text except for code identifiers, signal names, module names, file paths, rule/message IDs, violation IDs, and Verilog literals.
-
-Do not finish after the first CSV write. The final CSV must include the results
-of this second-pass review.
-
-### 5. Sort before validation
-
-After the second-pass review, sort the CSV by `root_id`, then by the numeric
-`vio_<number>` prefix in `leaf_violation_id`:
-
-```bash
-python skills/verilog-lint-root-cause-csv/scripts/sort_root_cause_csv.py \
-  <output_csv>
-```
-
-The sorter keeps the 9-column schema unchanged and preserves one row per input
-lint violation. Use `--output <sorted_csv>` only when the user asks to keep the
-unsorted draft.
-
-### 6. Validate before finishing
-
-```bash
-python skills/verilog-lint-root-cause-csv/scripts/validate_root_cause_csv.py \
-  <output_csv> \
-  --lint-items <LINT_ITEMS_JSON>
-```
-
-Fix validation errors and rerun until it passes.
+Do not finish after the first draft. Revise the same draft path until this
+second-pass review is complete, then return control to the outer workflow.

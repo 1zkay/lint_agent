@@ -15,6 +15,7 @@ from agent_runtime.checkpointer import build_checkpointer
 from agent_runtime.configuration import build_runtime_config_for_llm_preset, resolve_llm_preset_id
 from agent_runtime.middleware import create_lint_deep_agent
 from agent_runtime.prompts import SYSTEM_PROMPT
+from agent_runtime.root_cause import build_root_cause_workflow_tool
 from agent_runtime.tools import load_agent_tools
 from config import config
 from llm.factory import build_chat_model_from_config
@@ -113,6 +114,15 @@ async def _run_chat_runtime_owner(
 
         checkpointer = await build_checkpointer(exit_stack, log_prefix="[chat_app]")
         memory_store = await build_memory_store(config, exit_stack)
+        base_tools = tools
+        root_cause_tool = build_root_cause_workflow_tool(
+            llm,
+            base_tools,
+            root_dir=PROJECT_ROOT,
+            log_prefix="[chat_app:lint_root_cause]",
+        )
+        tools = [*base_tools, root_cause_tool]
+        tool_names = [*tool_names, root_cause_tool.name]
         agent, approval_guarded_tools, runtime_tool_names = create_lint_deep_agent(
             llm,
             tools,
@@ -122,6 +132,7 @@ async def _run_chat_runtime_owner(
             checkpointer=checkpointer,
             store=memory_store,
             context_schema=AgentContext,
+            tool_retry_tools=base_tools,
             disable_shell_if_unavailable=True,
         )
         tool_names = list(dict.fromkeys([*tool_names, *runtime_tool_names]))

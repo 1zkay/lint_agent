@@ -17,11 +17,11 @@ is responsible for final CSV writing, root_id assignment, and validation.
 """
 
 SUBAGENT_OUTPUT_PROMPT = """Return a concise Chinese report with:
-- candidate_root_id: a temporary local identifier such as candidate_001
-- root_range: filename:start-end
+- candidate_root_id: a temporary defect-class identifier such as candidate_001
+- occurrence_ranges: each filename:start-end matched to its vio_* IDs
 - leaf_violation_ids: the exact vio_* IDs covered
-- root_note: concrete root cause
-- fix_suggestion: concrete fix or waiver suggestion
+- root_note: shared defect mechanism
+- fix_suggestion: shared concrete repair strategy or false-positive disposition
 - parent_candidate: another candidate ID only for a real derived relationship, otherwise /
 - evidence: short source/rule evidence
 
@@ -95,8 +95,8 @@ def build_lint_subagents(
             "system_prompt": (
                 "You are an RTL lint root-cause analyst for local module evidence. "
                 "Inspect only the provided lint rows and source slices, then group "
-                "violations by the smallest source range where one edit would clear "
-                "the group. Do not group unrelated locations just because fixes look similar.\n\n"
+                "violations that share one defect mechanism and one concrete repair "
+                "strategy. Do not group by rule name or generic repair wording alone.\n\n"
                 + SUBAGENT_BOUNDARY_PROMPT
                 + "\n\n"
                 + SUBAGENT_OUTPUT_PROMPT
@@ -113,8 +113,8 @@ def build_lint_subagents(
             "system_prompt": (
                 "You are an RTL cross-module flow analyst. Focus on instance wiring, "
                 "clock/reset/control propagation, derived clocks, gated clocks, and "
-                "hierarchical signal roles. Prefer the source location where changing "
-                "one connection or control strategy would clear the linked violations.\n\n"
+                "hierarchical signal roles. Identify shared defect mechanisms, concrete "
+                "repair strategies, and every affected occurrence location.\n\n"
                 + SUBAGENT_BOUNDARY_PROMPT
                 + "\n\n"
                 + SUBAGENT_OUTPUT_PROMPT
@@ -130,9 +130,9 @@ def build_lint_subagents(
             ),
             "system_prompt": (
                 "You are an RTL style-policy analyst. Group policy violations by the "
-                "single declaration, port list, instance list, or naming block that "
-                "would be edited together. Mark a row as false positive only when the "
-                "provided RTL evidence proves the warning condition does not hold.\n\n"
+                "same policy defect and concrete repair strategy. Mark a row as false "
+                "positive when the code is intentional, conforms to project design "
+                "intent, and requires no RTL change.\n\n"
                 + SUBAGENT_BOUNDARY_PROMPT
                 + "\n\n"
                 + SUBAGENT_OUTPUT_PROMPT
@@ -149,9 +149,10 @@ def build_lint_subagents(
             "system_prompt": (
                 "You are a root-cause CSV contract reviewer. Do not redo full RTL "
                 "analysis unless a row lacks evidence. Check that every input vio_* "
-                "appears exactly once, repeated root fields are consistent, parent "
-                "roots exist, false positives follow the contract, and leaf_violation_note "
-                "matches message_id:description exactly. Return only issues and concise fixes."
+                "appears exactly once, repeated category fields are consistent, each "
+                "occurrence location is valid, parent roots exist, false positives "
+                "follow the contract, and leaf_violation_note matches "
+                "message_id:description exactly. Return only issues and concise fixes."
             ),
             "model": llm,
             "tools": [],

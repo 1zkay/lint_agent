@@ -20,6 +20,8 @@ unavailable or return graceful failure messages.
 - Uses DeepAgents `create_deep_agent` as the main agent runtime.
 - Uses MCP to expose the lint tool, Yosys, resources, and prompts as standard tools.
 - Uses LangGraph `StateGraph` for deterministic EDA preprocessing workflows.
+- Exposes the three-stage root-cause workflow as a native tool to both the
+  Chainlit agent and the LangGraph `lint` agent.
 - Uses the lint tool to generate lint violation CSV reports.
 - Uses Yosys / OSS CAD Suite to generate AST, RTLIL, CFG, DDG, DFG, and netlist artifacts.
 - Uses Agentic RAG over IEEE hardware reference PDFs.
@@ -35,6 +37,7 @@ DeepAgents create_deep_agent
   |-- Official base: todo, filesystem, skills, subagents, summarization, patching
   |-- Project middleware: retry, reflection, shell
   |-- HITL: create_deep_agent(interrupt_on=...)
+  |-- Native workflow tool: run_lint_root_cause_workflow
   |-- Memory tools
   |-- Agentic RAG tool
   |
@@ -67,6 +70,7 @@ LangGraph lint tool workflow
 | Agentic RAG            | `rag/hardware_reference.py`         | Reference-document retrieval and answer generation              |
 | Long-term memory       | `memory/long_term.py`               | User profile and durable memory tools                           |
 | LangGraph Agent Server | `langgraph_server/agent_runtime.py` | Alternative HTTP/CLI agent runtime                              |
+| Root-cause workflow    | `lint_root_cause_workflow/`         | Shared two-input workflow used by the native tool              |
 
 ## Requirements
 

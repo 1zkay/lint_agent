@@ -14,6 +14,7 @@ from agent_runtime.configuration import (
 )
 from agent_runtime.middleware import create_lint_deep_agent
 from agent_runtime.prompts import SYSTEM_PROMPT
+from agent_runtime.root_cause import build_root_cause_workflow_tool
 from agent_runtime.tools import load_agent_tools
 from compat.langgraph import (
     apply_dev_persistence_pickle_sanitization,
@@ -142,8 +143,15 @@ async def lint_agent_graph(runtime: ServerRuntime | None = None) -> AsyncIterato
 
     components = await _get_cached_runtime_components()
     llm = components["llm"]
-    tools = components["tools"]
+    base_tools = components["tools"]
     store = getattr(runtime, "store", None) if runtime is not None else None
+    root_cause_tool = build_root_cause_workflow_tool(
+        llm,
+        base_tools,
+        root_dir=REPO_ROOT,
+        log_prefix="[agent_runtime:lint_root_cause]",
+    )
+    tools = [*base_tools, root_cause_tool]
 
     agent, _, _ = create_lint_deep_agent(
         llm,
@@ -153,6 +161,7 @@ async def lint_agent_graph(runtime: ServerRuntime | None = None) -> AsyncIterato
         system_prompt=SYSTEM_PROMPT,
         store=store,
         context_schema=AgentContext,
+        tool_retry_tools=base_tools,
     )
 
     yield agent

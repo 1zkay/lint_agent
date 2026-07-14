@@ -5,14 +5,15 @@ from __future__ import annotations
 
 import argparse
 import csv
-import re
 import tempfile
 from pathlib import Path
 
-
-ROOT_ID_RE = re.compile(r"^root_(\d+)$")
-LEAF_ID_RE = re.compile(r"^vio_(\d+)$")
-FALSE_POSITIVE_ROOT_ID = "误报"
+from _contract import (
+    FALSE_POSITIVE_ROOT_ID,
+    ROOT_CAUSE_COLUMNS,
+    ROOT_ID_RE,
+    VIOLATION_ID_RE,
+)
 
 
 def _root_sort_key(root_id: str) -> tuple[int, int, str]:
@@ -27,7 +28,7 @@ def _root_sort_key(root_id: str) -> tuple[int, int, str]:
 
 def _leaf_sort_key(leaf_id: str) -> tuple[int, str]:
     text = str(leaf_id or "").strip()
-    match = LEAF_ID_RE.match(text)
+    match = VIOLATION_ID_RE.match(text)
     if match:
         return (int(match.group(1)), text)
     return (10**12, text)
@@ -36,9 +37,10 @@ def _leaf_sort_key(leaf_id: str) -> tuple[int, str]:
 def sort_csv(input_csv: Path, output_csv: Path) -> None:
     with input_csv.open(encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
-        if not reader.fieldnames:
-            raise ValueError("CSV header is empty")
-        fieldnames = list(reader.fieldnames)
+        if reader.fieldnames != ROOT_CAUSE_COLUMNS:
+            raise ValueError(
+                f"CSV header must be exactly {ROOT_CAUSE_COLUMNS}, got {reader.fieldnames}"
+            )
         rows = list(reader)
 
     sorted_rows = sorted(
@@ -52,7 +54,7 @@ def sort_csv(input_csv: Path, output_csv: Path) -> None:
 
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     with output_csv.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=ROOT_CAUSE_COLUMNS)
         writer.writeheader()
         for _, row in sorted_rows:
             writer.writerow(row)

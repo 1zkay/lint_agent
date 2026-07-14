@@ -8,7 +8,7 @@ import shutil
 import sys
 from collections.abc import Mapping
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import Any, Literal
 
 from deepagents import (
     GeneralPurposeSubagentProfile,
@@ -226,7 +226,9 @@ def _build_project_middleware(
     *,
     root_dir: str | Path,
     log_prefix: str,
+    tool_retry_tools: list[Any] | None = None,
     disable_shell_if_unavailable: bool = False,
+    model_retry_on_failure: Literal["continue", "error"] = "continue",
 ) -> tuple[list[Any], list[str]]:
     """Build project-specific middleware added after the DeepAgents base stack."""
     root_path = Path(root_dir).resolve()
@@ -243,11 +245,26 @@ def _build_project_middleware(
         logger.info("%s ReflectionMiddleware enabled (max_reflections=%s)", log_prefix, config.agent_reflection_max)
 
     if config.agent_enable_model_retry:
-        middleware_stack.append(ModelRetryMiddleware(max_retries=config.agent_model_retry_max))
-        logger.info("%s ModelRetryMiddleware enabled (max_retries=%s)", log_prefix, config.agent_model_retry_max)
+        middleware_stack.append(
+            ModelRetryMiddleware(
+                max_retries=config.agent_model_retry_max,
+                on_failure=model_retry_on_failure,
+            )
+        )
+        logger.info(
+            "%s ModelRetryMiddleware enabled (max_retries=%s, on_failure=%s)",
+            log_prefix,
+            config.agent_model_retry_max,
+            model_retry_on_failure,
+        )
 
     if config.agent_enable_tool_retry:
-        middleware_stack.append(ToolRetryMiddleware(max_retries=config.agent_tool_retry_max))
+        middleware_stack.append(
+            ToolRetryMiddleware(
+                max_retries=config.agent_tool_retry_max,
+                tools=tool_retry_tools,
+            )
+        )
         logger.info("%s ToolRetryMiddleware enabled (max_retries=%s)", log_prefix, config.agent_tool_retry_max)
 
     if config.agent_enable_shell:
@@ -294,7 +311,10 @@ def create_lint_deep_agent(
     checkpointer: Any | None = None,
     store: Any | None = None,
     context_schema: type[Any] | None = None,
+    name: str | None = None,
+    tool_retry_tools: list[Any] | None = None,
     disable_shell_if_unavailable: bool = False,
+    model_retry_on_failure: Literal["continue", "error"] = "continue",
 ) -> tuple[Any, list[str], list[str]]:
     """Create the ALINT agent through the official DeepAgents entrypoint."""
     root_path = Path(root_dir).resolve()
@@ -346,7 +366,9 @@ def create_lint_deep_agent(
         llm,
         root_dir=root_path,
         log_prefix=log_prefix,
+        tool_retry_tools=tool_retry_tools,
         disable_shell_if_unavailable=disable_shell_if_unavailable,
+        model_retry_on_failure=model_retry_on_failure,
     )
 
     agent = create_deep_agent(
@@ -361,6 +383,7 @@ def create_lint_deep_agent(
         checkpointer=checkpointer,
         store=store,
         context_schema=context_schema,
+        name=name,
     )
 
     logger.info(

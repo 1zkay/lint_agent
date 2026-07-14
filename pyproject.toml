@@ -9,6 +9,7 @@ description = "ALINT-PRO LangGraph Agent Server entrypoint"
 requires-python = ">=3.12,<3.13"
 
 [tool.setuptools]
+include-package-data = true
 py-modules = [
   "config"
 ]
@@ -23,8 +24,17 @@ packages = [
   "memory",
   "prompts",
   "rag",
+  "skills",
   "langgraph_server",
+  "lint_root_cause_workflow",
   "mcp_server",
   "mcp_server.tools",
   "workspace",
+]
+
+[tool.setuptools.package-data]
+skills = [
+  "*/SKILL.md",
+  "*/references/*",
+  "*/scripts/*.py",
 ]
