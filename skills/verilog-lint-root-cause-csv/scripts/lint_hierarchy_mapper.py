@@ -545,6 +545,8 @@ def parse_lint_csv(
                 contents = str(row.get("Contents", "") or "")
                 if not pos_match and not position:
                     pos_match = EMBEDDED_POSITION_RE.search(contents)
+                    if pos_match:
+                        contents = contents[: pos_match.start()].rstrip()
                 if not pos_match:
                     raise ValueError(
                         f"{csv_path}:{row_index + 1}: invalid LineNo: {position!r}"
