@@ -55,6 +55,7 @@ LEGACY_LINT_INPUT_COLUMNS = (
     "lineno",
     "",
 )
+SV_FRONTEND_FALLBACK_ERROR = "Invalid nesting of always blocks and/or initializations."
 
 
 @dataclass(frozen=True)
@@ -216,32 +217,87 @@ def run_yosys(
     cmd_parts.extend(yosys_quote(path) for path in files)
 
     hierarchy_cmd = f"hierarchy -check -top {top}" if top else "hierarchy -check -auto-top"
-    # hierarchy may derive new parameterized modules after the first proc pass.
-    script = "\n".join(
-        [
-            " ".join(cmd_parts),
-            "proc",
-            f"write_json {yosys_quote(all_modules_path)}",
-            hierarchy_cmd,
-            "proc",
-            f"write_json {yosys_quote(hierarchy_path)}",
-            "",
-        ]
-    )
-    script_path.write_text(script, encoding="utf-8")
 
-    result = subprocess.run(
-        [str(yosys.bin), "-q", "-s", str(script_path)],
-        cwd=build_dir,
-        env=build_yosys_env(yosys),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    def write_script(path: Path, read_command: list[str]) -> None:
+        # hierarchy may derive new parameterized modules after the first proc pass.
+        script = "\n".join(
+            [
+                " ".join(read_command),
+                "proc",
+                f"write_json {yosys_quote(all_modules_path)}",
+                hierarchy_cmd,
+                "proc",
+                f"write_json {yosys_quote(hierarchy_path)}",
+                "",
+            ]
+        )
+        path.write_text(script, encoding="utf-8")
+
+    def execute(path: Path, *, plugin: str | None = None) -> subprocess.CompletedProcess[str]:
+        command = [str(yosys.bin)]
+        if plugin:
+            command.extend(["-m", plugin])
+        command.extend(["-q", "-s", str(path)])
+        return subprocess.run(
+            command,
+            cwd=build_dir,
+            env=build_yosys_env(yosys),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    write_script(script_path, cmd_parts)
+    result = execute(script_path)
+    fallback_script_path: Path | None = None
+    if (
+        result.returncode != 0
+        and has_sv
+        and SV_FRONTEND_FALLBACK_ERROR in result.stderr
+    ):
+        (work_root / "yosys.read_verilog.stdout.log").write_text(
+            result.stdout,
+            encoding="utf-8",
+            errors="replace",
+        )
+        (work_root / "yosys.read_verilog.stderr.log").write_text(
+            result.stderr,
+            encoding="utf-8",
+            errors="replace",
+        )
+        slang_filelist_path = work_root / "hierarchy.slang.f"
+        slang_filelist_parts: list[str] = []
+        for incdir in incdirs:
+            slang_filelist_parts.extend(["-I", yosys_quote(incdir)])
+        for define in defines:
+            slang_filelist_parts.extend(["-D", yosys_quote(define)])
+        slang_filelist_parts.extend(yosys_quote(path) for path in files)
+        slang_filelist_path.write_text(
+            "\n".join(slang_filelist_parts) + "\n",
+            encoding="utf-8",
+        )
+        fallback_script_path = work_root / "hierarchy.slang.ys"
+        write_script(
+            fallback_script_path,
+            ["read_slang", "--keep-hierarchy", "-f", "../hierarchy.slang.f"],
+        )
+        result = execute(fallback_script_path, plugin="slang")
+
     (work_root / "yosys.stdout.log").write_text(result.stdout, encoding="utf-8", errors="replace")
     (work_root / "yosys.stderr.log").write_text(result.stderr, encoding="utf-8", errors="replace")
     if result.returncode != 0:
+        if fallback_script_path:
+            raise RuntimeError(
+                "Yosys failed after SystemVerilog frontend fallback. See logs:\n"
+                f"  read_verilog script: {script_path}\n"
+                f"  read_verilog stdout: {work_root / 'yosys.read_verilog.stdout.log'}\n"
+                f"  read_verilog stderr: {work_root / 'yosys.read_verilog.stderr.log'}\n"
+                f"  read_slang script: {fallback_script_path}\n"
+                f"  read_slang stdout: {work_root / 'yosys.stdout.log'}\n"
+                f"  read_slang stderr: {work_root / 'yosys.stderr.log'}\n"
+                f"read_slang stderr tail:\n{result.stderr[-2000:]}"
+            )
         raise RuntimeError(
             "Yosys failed. See logs:\n"
             f"  script: {script_path}\n"
@@ -252,11 +308,17 @@ def run_yosys(
     return hierarchy_path, all_modules_path
 
 
-def module_display_name(internal_name: str, module: dict) -> str:
+def module_display_name(
+    internal_name: str,
+    module: dict,
+    source_modules: set[str],
+) -> str:
     attrs = module.get("attributes", {})
     hdlname = attrs.get("hdlname")
     if isinstance(hdlname, str) and hdlname:
         return hdlname.split()[-1]
+    if internal_name in source_modules:
+        return internal_name
     if internal_name.startswith("$paramod\\"):
         parts = internal_name.split("\\")
         if len(parts) >= 2:
@@ -265,6 +327,13 @@ def module_display_name(internal_name: str, module: dict) -> str:
         parts = internal_name.split("\\")
         if parts:
             return parts[-1]
+    slang_matches = [
+        source_module
+        for source_module in source_modules
+        if internal_name.startswith(f"{source_module}$")
+    ]
+    if slang_matches:
+        return max(slang_matches, key=len)
     return internal_name
 
 
@@ -286,12 +355,16 @@ def find_top_module(modules: dict[str, dict]) -> str:
     return tops[0]
 
 
-def build_hierarchy(json_path: Path) -> tuple[CellNode, dict[str, list[str]]]:
+def build_hierarchy(
+    json_path: Path,
+    source_modules: set[str],
+) -> tuple[CellNode, dict[str, list[str]]]:
     data = json.loads(json_path.read_text(encoding="utf-8"))
     modules: dict[str, dict] = data["modules"]
     module_names = set(modules)
     display_by_internal = {
-        internal: module_display_name(internal, module) for internal, module in modules.items()
+        internal: module_display_name(internal, module, source_modules)
+        for internal, module in modules.items()
     }
     top_internal = find_top_module(modules)
     top_display = display_by_internal[top_internal]
@@ -519,8 +592,9 @@ def build_design_metadata(
 ) -> dict:
     design = json.loads(json_path.read_text(encoding="utf-8"))
     yosys_modules: dict[str, dict] = design["modules"]
+    source_modules = {item.module for item in ranges}
     display_by_internal = {
-        internal: module_display_name(internal, module)
+        internal: module_display_name(internal, module, source_modules)
         for internal, module in yosys_modules.items()
     }
     source_by_module: dict[str, str] = {}
@@ -641,8 +715,9 @@ def main() -> int:
             args.top or filelist_top,
             work_root,
         )
-        root, module_to_paths = build_hierarchy(hierarchy_json)
         ranges = parse_module_ranges(files, source_root / "rtl")
+        source_modules = {item.module for item in ranges}
+        root, module_to_paths = build_hierarchy(hierarchy_json, source_modules)
         mapped = parse_lint_csv(csv_path, ranges, module_to_paths)
         metadata = build_design_metadata(all_modules_json, ranges)
         write_outputs(out_dir, root, mapped, metadata)
