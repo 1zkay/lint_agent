@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ from langchain_core.exceptions import OutputParserException
 from langchain_core.runnables import RunnableConfig
 from langgraph.runtime import Runtime
 
+from config import config as app_config
 from memory.long_term import AgentContext
 
 from .prompts import (
@@ -83,6 +85,19 @@ def _stdout_value(result: ScriptResult, key: str) -> str:
 
 def _agent_context(runtime: Runtime[AgentContext]) -> AgentContext:
     return runtime.context or AgentContext()
+
+
+def _cleanup_intermediate_run(run_dir: str) -> None:
+    if app_config.lint_root_cause_keep_intermediates:
+        return
+
+    reports_dir = (REPO_ROOT / "reports").resolve()
+    path = Path(run_dir).resolve()
+    if path.parent != reports_dir:
+        raise RuntimeError(
+            f"refusing to remove intermediate directory outside reports/: {path}"
+        )
+    shutil.rmtree(path)
 
 
 class WorkflowNodes:
@@ -232,6 +247,7 @@ class WorkflowNodes:
             validation = await self._validate_report(report_path, state["slices_dir"])
             if validation.returncode == 0:
                 report_path.chmod(0o644)
+                _cleanup_intermediate_run(state["run_dir"])
                 return {
                     "validation_error": "",
                     "report_path": str(report_path),
@@ -277,6 +293,7 @@ class WorkflowNodes:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(draft_csv, report_path)
         report_path.chmod(0o644)
+        _cleanup_intermediate_run(state["run_dir"])
         return {
             "validation_error": "",
             "report_path": str(report_path),

@@ -333,6 +333,7 @@ def main() -> int:
             str(run_dir),
             "--out-dir",
             str(work_dir),
+            "--keep-work",
         ]
         if args.top:
             command.extend(["--top", args.top])
@@ -345,11 +346,12 @@ def main() -> int:
         )
         if result.returncode:
             raise RuntimeError(f"hierarchy mapper failed:\n{result.stderr[-2000:]}")
+        shutil.rmtree(work_dir / "_work", ignore_errors=True)
         if extracted.exists():
             shutil.rmtree(extracted)
-    except Exception:
-        shutil.rmtree(run_dir, ignore_errors=True)
-        raise
+    except Exception as exc:
+        shutil.rmtree(extracted, ignore_errors=True)
+        raise RuntimeError(f"{exc}\nfailed run retained: {run_dir}") from exc
 
     print(f"PROJECT_NAME={project_name}")
     print(f"RUN_DIR={run_dir}")

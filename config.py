@@ -181,6 +181,9 @@ class Config:
         # directory searched for common layouts such as bin/yosys and oss-cad-suite/bin/yosys.
         self.yosys_bin = os.getenv("YOSYS_BIN", "").strip()
         self.yosys_search_root = os.getenv("YOSYS_SEARCH_ROOT", "").strip()
+        self.lint_root_cause_keep_intermediates = self._bool_env(
+            "LINT_ROOT_CAUSE_KEEP_INTERMEDIATES", "true"
+        )
 
         # Agentic RAG (built-in reference PDFs)
         self.rag_enabled = self._bool_env("RAG_ENABLED", "true")

@@ -216,12 +216,14 @@ def run_yosys(
     cmd_parts.extend(yosys_quote(path) for path in files)
 
     hierarchy_cmd = f"hierarchy -check -top {top}" if top else "hierarchy -check -auto-top"
+    # hierarchy may derive new parameterized modules after the first proc pass.
     script = "\n".join(
         [
             " ".join(cmd_parts),
             "proc",
             f"write_json {yosys_quote(all_modules_path)}",
             hierarchy_cmd,
+            "proc",
             f"write_json {yosys_quote(hierarchy_path)}",
             "",
         ]
