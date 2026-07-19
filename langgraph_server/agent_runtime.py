@@ -51,11 +51,14 @@ if _bool_env(
     legacy_key="MCP_ALINT_PATCH_LANGGRAPH_DEV_PERSISTENCE",
 ):
     apply_dev_persistence_pickle_sanitization(log_prefix="[agent_runtime]")
-def build_llm_for_runtime_config(runtime_cfg: Any) -> Any:
+def build_llm_for_runtime_config(
+    runtime_cfg: Any, *, temperature: float | None = None
+) -> Any:
     if not runtime_cfg.llm_model:
         raise RuntimeError("LLM_MODEL is empty. Configure .env before starting LangGraph Agent Server.")
     return build_chat_model_from_config(
         runtime_cfg,
+        temperature=temperature,
         logger=logger,
         log_prefix="[agent_runtime]",
     )
@@ -88,6 +91,14 @@ async def _build_cached_runtime_components() -> dict[str, Any]:
     config.validate()
     runtime_cfg = build_runtime_config_for_llm_preset()
     llm = build_llm_for_runtime_config(runtime_cfg)
+    candidate_llm = build_llm_for_runtime_config(
+        runtime_cfg,
+        temperature=runtime_cfg.lint_root_cause_candidate_temperature,
+    )
+    judge_llm = build_llm_for_runtime_config(
+        runtime_cfg,
+        temperature=runtime_cfg.lint_root_cause_judge_temperature,
+    )
     exit_stack = AsyncExitStack()
     try:
         loaded_tools = await load_agent_tools(
@@ -101,6 +112,9 @@ async def _build_cached_runtime_components() -> dict[str, Any]:
     return {
         "exit_stack": exit_stack,
         "llm": llm,
+        "candidate_llm": candidate_llm,
+        "judge_llm": judge_llm,
+        "ensemble_size": runtime_cfg.lint_root_cause_ensemble_size,
         "tools": loaded_tools.tools,
     }
 
@@ -143,11 +157,16 @@ async def lint_agent_graph(runtime: ServerRuntime | None = None) -> AsyncIterato
 
     components = await _get_cached_runtime_components()
     llm = components["llm"]
+    candidate_llm = components["candidate_llm"]
+    judge_llm = components["judge_llm"]
     base_tools = components["tools"]
     store = getattr(runtime, "store", None) if runtime is not None else None
     root_cause_tool = build_root_cause_workflow_tool(
         llm,
         base_tools,
+        candidate_llm=candidate_llm,
+        judge_llm=judge_llm,
+        ensemble_size=components["ensemble_size"],
         root_dir=REPO_ROOT,
         log_prefix="[agent_runtime:lint_root_cause]",
     )

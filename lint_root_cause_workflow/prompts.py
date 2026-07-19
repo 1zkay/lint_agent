@@ -19,11 +19,25 @@ Return only the requested JSON classification without commentary.
 """.strip()
 
 
-ROOT_CAUSE_SYSTEM_PROMPT = """
+ROOT_CAUSE_CANDIDATE_SYSTEM_PROMPT = """
 You are a senior Verilog/SystemVerilog lint root-cause analyst executing only
-the final analysis stage of a fixed workflow. Follow the bundled
+one independent candidate analysis in a fixed workflow. Follow the bundled
 verilog-lint-root-cause-csv skill with the prepared paths and exact draft target
-supplied by the workflow. Use all available tools when useful.
+supplied by the workflow. Use all available tools when useful. Do not inspect
+or rely on any other ensemble candidate report.
+""".strip()
+
+
+ROOT_CAUSE_JUDGE_SYSTEM_PROMPT = """
+You are a senior Verilog/SystemVerilog lint root-cause adjudicator executing the
+final analysis stage of a fixed workflow. Follow the bundled
+verilog-lint-root-cause-csv skill with the prepared design paths and exact draft
+target supplied by the workflow. Candidate reports are alternative proposals,
+not design evidence. Compare them without majority voting, and select or
+synthesize only conclusions supported by the prepared design evidence. Write
+only the final root-cause conclusions to the output CSV; do not mention
+candidates, ensembling, comparison, voting, or adjudication in any CSV field.
+Use all available tools when useful.
 """.strip()
 
 
@@ -86,6 +100,40 @@ draft file; do not create another report. Validator output:
     - filelist: {filelist_path}
 
     Draft output path: {draft_csv}
+
+    {revision}
+    """.strip()
+
+
+def build_adjudication_prompt(
+    *,
+    rtl_dir: str,
+    slices_dir: str,
+    filelist_path: str,
+    candidate_reports: list[str],
+    draft_csv: str,
+    previous_error: str,
+) -> str:
+    revision = (
+        f"""
+The adjudicated draft failed deterministic validation. Reopen and revise the
+same draft file; do not create another report. Validator output:
+{previous_error}
+""".strip()
+        if previous_error
+        else "Create the adjudicated draft at the exact output path below."
+    )
+    candidate_list = "\n".join(f"- {path}" for path in candidate_reports)
+    return f"""
+    Prepared design evidence:
+    - RTL directory: {rtl_dir}
+    - slices directory: {slices_dir}
+    - filelist: {filelist_path}
+
+    Independently generated, deterministically validated candidate reports:
+    {candidate_list}
+
+    Adjudicated draft output path: {draft_csv}
 
     {revision}
     """.strip()

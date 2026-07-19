@@ -184,6 +184,15 @@ class Config:
         self.lint_root_cause_keep_intermediates = self._bool_env(
             "LINT_ROOT_CAUSE_KEEP_INTERMEDIATES", "true"
         )
+        self.lint_root_cause_ensemble_size = int(
+            os.getenv("LINT_ROOT_CAUSE_ENSEMBLE_SIZE", "3")
+        )
+        self.lint_root_cause_candidate_temperature = float(
+            os.getenv("LINT_ROOT_CAUSE_CANDIDATE_TEMPERATURE", "0.7")
+        )
+        self.lint_root_cause_judge_temperature = float(
+            os.getenv("LINT_ROOT_CAUSE_JUDGE_TEMPERATURE", "0.0")
+        )
 
         # Agentic RAG (built-in reference PDFs)
         self.rag_enabled = self._bool_env("RAG_ENABLED", "true")

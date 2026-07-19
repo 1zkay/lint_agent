@@ -1,6 +1,7 @@
 """Typed state contracts for the lint root-cause workflow."""
 
-from typing import Literal
+import operator
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict
 from typing_extensions import TypedDict
@@ -12,6 +13,11 @@ class WorkflowInput(TypedDict):
 
 
 class WorkflowOutput(TypedDict):
+    report_path: str
+
+
+class CandidateReport(TypedDict):
+    candidate_id: int
     report_path: str
 
 
@@ -27,6 +33,24 @@ class WorkflowState(WorkflowInput, total=False):
     report_path: str
     slice_error: str
     validation_error: str
+    candidate_reports: Annotated[list[CandidateReport], operator.add]
+
+
+class CandidateWorkflowInput(TypedDict):
+    candidate_id: int
+    candidate_draft_csv: str
+    rtl_dir: str
+    filelist_path: str
+    slices_dir: str
+
+
+class CandidateWorkflowOutput(TypedDict):
+    candidate_reports: list[CandidateReport]
+
+
+class CandidateWorkflowState(CandidateWorkflowInput, total=False):
+    validation_error: str
+    candidate_reports: list[CandidateReport]
 
 
 class SlicePolicy(BaseModel):

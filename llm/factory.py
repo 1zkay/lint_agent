@@ -33,6 +33,7 @@ def build_openrouter_default_headers(base_url: str, cfg: Any) -> dict[str, str] 
 def build_chat_model_from_config(
     cfg: Any,
     *,
+    temperature: float | None = None,
     logger: logging.Logger | None = None,
     log_prefix: str = "[llm.factory]",
 ):
@@ -42,7 +43,7 @@ def build_chat_model_from_config(
         return None
 
     kwargs: dict[str, Any] = {
-        "temperature": cfg.llm_temperature,
+        "temperature": cfg.llm_temperature if temperature is None else temperature,
         "max_tokens": cfg.llm_max_tokens,
         "timeout": cfg.llm_timeout,
     }

@@ -20,10 +20,11 @@ from memory.long_term import AgentContext
 
 from .prompts import (
     SLICE_POLICY_PARSER,
+    build_adjudication_prompt,
     build_classifier_prompt,
     build_root_cause_prompt,
 )
-from .state import WorkflowState
+from .state import CandidateWorkflowState, WorkflowState
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -103,9 +104,18 @@ def _cleanup_intermediate_run(run_dir: str) -> None:
 class WorkflowNodes:
     """Bind immutable agent graphs to stateless workflow node methods."""
 
-    def __init__(self, *, classifier_agent: Any, root_cause_agent: Any) -> None:
+    def __init__(
+        self,
+        *,
+        classifier_agent: Any,
+        candidate_agent: Any,
+        judge_agent: Any,
+        ensemble_size: int,
+    ) -> None:
         self.classifier_agent = classifier_agent
-        self.root_cause_agent = root_cause_agent
+        self.candidate_agent = candidate_agent
+        self.judge_agent = judge_agent
+        self.ensemble_size = ensemble_size
 
     async def prepare_inputs(self, state: WorkflowState) -> dict[str, Any]:
         source_path = Path(state["source_path"]).expanduser().resolve()
@@ -172,6 +182,7 @@ class WorkflowNodes:
             "report_path": str(report_path),
             "slice_error": "",
             "validation_error": "",
+            "candidate_reports": [],
         }
 
     async def classify_and_slice(
@@ -234,7 +245,57 @@ class WorkflowNodes:
             "slices_dir": "",
         }
 
-    async def analyze_root_causes(
+    async def analyze_candidate(
+        self,
+        state: CandidateWorkflowState,
+        config: RunnableConfig,
+        runtime: Runtime[AgentContext],
+    ) -> dict[str, Any]:
+        candidate_id = state["candidate_id"]
+        draft_csv = Path(state["candidate_draft_csv"])
+        draft_csv.parent.mkdir(parents=True, exist_ok=True)
+        previous_error = state.get("validation_error", "")
+
+        if draft_csv.is_file() and not previous_error:
+            validation = await self._validate_report(draft_csv, state["slices_dir"])
+            if validation.returncode == 0:
+                return self._candidate_success(candidate_id, draft_csv)
+            if validation.returncode != 2:
+                raise RuntimeError(
+                    f"candidate validator failed: {_script_error(validation)}"
+                )
+            previous_error = _script_error(validation)
+
+        prompt = build_root_cause_prompt(
+            rtl_dir=state["rtl_dir"],
+            slices_dir=state["slices_dir"],
+            filelist_path=state["filelist_path"],
+            draft_csv=str(draft_csv),
+            previous_error=previous_error,
+        )
+        await self.candidate_agent.ainvoke(
+            {"messages": [{"role": "user", "content": prompt}]},
+            config=config,
+            context=_agent_context(runtime),
+        )
+
+        if not draft_csv.is_file():
+            return self._analysis_failure(
+                f"candidate {candidate_id} did not create its required draft: "
+                f"{draft_csv}"
+            )
+
+        validation = await self._validate_report(draft_csv, state["slices_dir"])
+        if validation.returncode == 2:
+            return self._analysis_failure(_script_error(validation))
+        if validation.returncode:
+            raise RuntimeError(
+                f"candidate validator failed: {_script_error(validation)}"
+            )
+
+        return self._candidate_success(candidate_id, draft_csv)
+
+    async def adjudicate_root_causes(
         self,
         state: WorkflowState,
         config: RunnableConfig,
@@ -256,14 +317,15 @@ class WorkflowNodes:
                 f"existing published report is invalid: {_script_error(validation)}"
             )
 
-        prompt = build_root_cause_prompt(
+        prompt = build_adjudication_prompt(
             rtl_dir=state["rtl_dir"],
             slices_dir=state["slices_dir"],
             filelist_path=state["filelist_path"],
+            candidate_reports=self._candidate_report_paths(state),
             draft_csv=str(draft_csv),
             previous_error=state.get("validation_error", ""),
         )
-        await self.root_cause_agent.ainvoke(
+        await self.judge_agent.ainvoke(
             {"messages": [{"role": "user", "content": prompt}]},
             config=config,
             context=_agent_context(runtime),
@@ -297,6 +359,36 @@ class WorkflowNodes:
         return {
             "validation_error": "",
             "report_path": str(report_path),
+        }
+
+    def _candidate_report_paths(self, state: WorkflowState) -> list[str]:
+        reports_by_id: dict[int, str] = {}
+        for report in state.get("candidate_reports", []):
+            candidate_id = report["candidate_id"]
+            report_path = str(
+                _required_path(Path(report["report_path"]).resolve(), directory=False)
+            )
+            existing = reports_by_id.setdefault(candidate_id, report_path)
+            if existing != report_path:
+                raise RuntimeError(
+                    f"candidate {candidate_id} returned conflicting report paths"
+                )
+
+        expected_ids = set(range(self.ensemble_size))
+        if set(reports_by_id) != expected_ids:
+            raise RuntimeError(
+                "candidate report set is incomplete: "
+                f"expected {sorted(expected_ids)}, got {sorted(reports_by_id)}"
+            )
+        return [reports_by_id[candidate_id] for candidate_id in sorted(expected_ids)]
+
+    @staticmethod
+    def _candidate_success(candidate_id: int, report_path: Path) -> dict[str, Any]:
+        return {
+            "validation_error": "",
+            "candidate_reports": [
+                {"candidate_id": candidate_id, "report_path": str(report_path)}
+            ],
         }
 
     async def _validate_report(

@@ -115,9 +115,20 @@ async def _run_chat_runtime_owner(
         checkpointer = await build_checkpointer(exit_stack, log_prefix="[chat_app]")
         memory_store = await build_memory_store(config, exit_stack)
         base_tools = tools
+        candidate_llm = build_chat_model_from_config(
+            runtime_cfg,
+            temperature=runtime_cfg.lint_root_cause_candidate_temperature,
+        )
+        judge_llm = build_chat_model_from_config(
+            runtime_cfg,
+            temperature=runtime_cfg.lint_root_cause_judge_temperature,
+        )
         root_cause_tool = build_root_cause_workflow_tool(
             llm,
             base_tools,
+            candidate_llm=candidate_llm,
+            judge_llm=judge_llm,
+            ensemble_size=runtime_cfg.lint_root_cause_ensemble_size,
             root_dir=PROJECT_ROOT,
             log_prefix="[chat_app:lint_root_cause]",
         )
