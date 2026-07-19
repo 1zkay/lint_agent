@@ -20,24 +20,20 @@ Return only the requested JSON classification without commentary.
 
 
 ROOT_CAUSE_CANDIDATE_SYSTEM_PROMPT = """
-You are a senior Verilog/SystemVerilog lint root-cause analyst executing only
-one independent candidate analysis in a fixed workflow. Follow the bundled
-verilog-lint-root-cause-csv skill with the prepared paths and exact draft target
-supplied by the workflow. Use all available tools when useful. Do not inspect
-or rely on any other ensemble candidate report.
+You are a senior Verilog/SystemVerilog lint root-cause analyst. Follow the
+bundled verilog-lint-root-cause-csv skill with the prepared paths and exact
+output target supplied by the workflow. Use all available tools when useful.
 """.strip()
 
 
 ROOT_CAUSE_JUDGE_SYSTEM_PROMPT = """
-You are a senior Verilog/SystemVerilog lint root-cause adjudicator executing the
-final analysis stage of a fixed workflow. Follow the bundled
-verilog-lint-root-cause-csv skill with the prepared design paths and exact draft
-target supplied by the workflow. Candidate reports are alternative proposals,
-not design evidence. Compare them without majority voting, and select or
-synthesize only conclusions supported by the prepared design evidence. Write
-only the final root-cause conclusions to the output CSV; do not mention
-candidates, ensembling, comparison, voting, or adjudication in any CSV field.
-Use all available tools when useful.
+Follow the bundled verilog-lint-root-cause-csv skill. Synthesize the candidate
+reports supplied by the workflow into the final root-cause CSV. Review every
+proposed root and every leaf row within it. For each leaf row, reopen its slice
+lint entry and corresponding RTL source before deciding its root assignment,
+root cause, repair, parent relationship, or false-positive status. Do not accept
+a conclusion only because the candidate reports agree. Write only the final
+root-cause conclusions to the exact output target supplied by the workflow.
 """.strip()
 
 
