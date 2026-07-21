@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
+import csv
 import re
+import sys
+
+
+def _allow_maximum_csv_field_size() -> None:
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return
+        except OverflowError:
+            limit //= 10
+
+
+_allow_maximum_csv_field_size()
 
 
 MAPPED_LINT_COLUMNS = [
