@@ -54,6 +54,7 @@ Use project-relative paths for files inside the agent repository root: `.files/.
 When reading files referenced by a skill, resolve relative paths from that skill directory. For example, if a skill at `skills/example/SKILL.md` references `scripts/run.py`, read `skills/example/scripts/run.py`.
 When this agent runs in the customer Docker package with a platform override file, host paths are automatically mapped through the configured bind mount. For example, Windows `D:\\project\\file.sv` can resolve through `/host/d/project/file.sv`, and Linux `/home/user/project/top.sv` can resolve through `/host/root/home/user/project/top.sv`.
 Use pagination with offset/limit when reading large files.
+When running shell commands, ensure any non-empty standard output ends with a newline; append one when a command may omit it.
 """
 
 
