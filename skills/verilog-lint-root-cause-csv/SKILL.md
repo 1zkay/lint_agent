@@ -130,7 +130,8 @@ root_id,root_note,fix_suggestion,root_file_path,root_file_start,root_file_end,pa
 Apply these rules:
 
 - write one output row for every lint row and exactly one leaf ID per row;
-- use stable normal IDs such as `root_001`;
+- number normal roots consecutively as `root_001` through `root_N`; false
+  positives do not consume a number;
 - repeat identical `root_note`, `fix_suggestion`, and `parent_root_id` values on
   every row sharing a normal root ID;
 - write `root_note` and `fix_suggestion` in concise Chinese;

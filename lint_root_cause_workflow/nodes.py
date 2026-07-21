@@ -257,7 +257,9 @@ class WorkflowNodes:
         previous_error = state.get("validation_error", "")
 
         if draft_csv.is_file() and not previous_error:
-            validation = await self._validate_report(draft_csv, state["slices_dir"])
+            validation = await self._normalize_and_validate_report(
+                draft_csv, state["slices_dir"]
+            )
             if validation.returncode == 0:
                 return self._candidate_success(candidate_id, draft_csv)
             if validation.returncode != 2:
@@ -285,7 +287,9 @@ class WorkflowNodes:
                 f"{draft_csv}"
             )
 
-        validation = await self._validate_report(draft_csv, state["slices_dir"])
+        validation = await self._normalize_and_validate_report(
+            draft_csv, state["slices_dir"]
+        )
         if validation.returncode == 2:
             return self._analysis_failure(_script_error(validation))
         if validation.returncode:
@@ -336,21 +340,13 @@ class WorkflowNodes:
                 f"agent did not create the required draft: {draft_csv}"
             )
 
-        validation = await self._validate_report(draft_csv, state["slices_dir"])
+        validation = await self._normalize_and_validate_report(
+            draft_csv, state["slices_dir"]
+        )
         if validation.returncode == 2:
             return self._analysis_failure(_script_error(validation))
         if validation.returncode:
             raise RuntimeError(f"report validator failed: {_script_error(validation)}")
-
-        sort_result = await _run_script(SORT_SCRIPT, str(draft_csv))
-        if sort_result.returncode:
-            raise RuntimeError(f"report sorter failed: {_script_error(sort_result)}")
-
-        sorted_validation = await self._validate_report(draft_csv, state["slices_dir"])
-        if sorted_validation.returncode:
-            raise RuntimeError(
-                f"sorted report failed validation: {_script_error(sorted_validation)}"
-            )
 
         report_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(draft_csv, report_path)
@@ -400,6 +396,21 @@ class WorkflowNodes:
             "--slices-dir",
             slices_dir,
         )
+
+    async def _normalize_and_validate_report(
+        self, report_path: Path, slices_dir: str
+    ) -> ScriptResult:
+        sort_result = await _run_script(SORT_SCRIPT, str(report_path))
+        if sort_result.returncode:
+            return ScriptResult(
+                returncode=2,
+                stdout="",
+                stderr=(
+                    "root-cause CSV normalization failed: "
+                    f"{_script_error(sort_result)}"
+                ),
+            )
+        return await self._validate_report(report_path, slices_dir)
 
     def _analysis_failure(self, error: str) -> dict[str, Any]:
         return {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sort a root-cause CSV by root_id and then by leaf violation number."""
+"""Normalize root IDs and sort a root-cause CSV."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from _contract import (
     ROOT_CAUSE_COLUMNS,
     ROOT_ID_RE,
     VIOLATION_ID_RE,
+    format_root_id,
 )
 
 
@@ -43,6 +44,26 @@ def sort_csv(input_csv: Path, output_csv: Path) -> None:
                 f"CSV header must be exactly {ROOT_CAUSE_COLUMNS}, got {reader.fieldnames}"
             )
         rows = list(reader)
+
+    normal_root_ids = sorted(
+        {
+            str(row.get("root_id", "")).strip()
+            for row in rows
+            if ROOT_ID_RE.match(str(row.get("root_id", "")).strip())
+        },
+        key=_root_sort_key,
+    )
+    root_id_mapping = {
+        root_id: format_root_id(index)
+        for index, root_id in enumerate(normal_root_ids, start=1)
+    }
+    for row in rows:
+        root_id = str(row.get("root_id", "")).strip()
+        parent_root_id = str(row.get("parent_root_id", "")).strip()
+        if root_id in root_id_mapping:
+            row["root_id"] = root_id_mapping[root_id]
+        if parent_root_id in root_id_mapping:
+            row["parent_root_id"] = root_id_mapping[parent_root_id]
 
     sorted_rows = sorted(
         enumerate(rows),
@@ -97,7 +118,10 @@ def main() -> int:
     else:
         sort_csv_in_place(input_csv)
 
-    print(f"OK: sorted root-cause CSV: {Path(args.output) if args.output else input_csv}")
+    print(
+        "OK: normalized and sorted root-cause CSV: "
+        f"{Path(args.output) if args.output else input_csv}"
+    )
     return 0
 
 

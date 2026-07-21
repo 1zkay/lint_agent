@@ -18,6 +18,7 @@ from _contract import (
     ROOT_ID_RE,
     SLICE_SCOPES,
     VIOLATION_ID_RE,
+    format_root_id,
 )
 from _filelist import HEADER_SUFFIXES, SOURCE_SUFFIXES
 
@@ -298,6 +299,22 @@ def validate(output_csv: Path, slices_dir: Path) -> list[str]:
             errors.append(f"{len(missing_ids) - 20} more input violation IDs are missing")
 
     known_root_ids = set(root_definitions)
+    normal_root_ids = {
+        root_id for root_id in known_root_ids if ROOT_ID_RE.match(root_id)
+    }
+    expected_root_ids = {
+        format_root_id(index) for index in range(1, len(normal_root_ids) + 1)
+    }
+    if normal_root_ids != expected_root_ids:
+        actual = sorted(
+            normal_root_ids,
+            key=lambda root_id: int(ROOT_ID_RE.match(root_id).group(1)),
+        )
+        errors.append(
+            "normal root_id values must be contiguous from root_001; got "
+            f"{', '.join(actual[:20])}"
+            f"{' ...' if len(actual) > 20 else ''}"
+        )
     for parent_root_id, locations in sorted(parent_references.items()):
         if parent_root_id not in known_root_ids:
             errors.append(f"unknown parent_root_id {parent_root_id}: {', '.join(locations[:20])}")

@@ -52,5 +52,9 @@ VIOLATION_ID_RE = re.compile(r"^vio_(\d{3,})$")
 FALSE_POSITIVE_ROOT_ID = "误报"
 
 
+def format_root_id(number: int) -> str:
+    return f"root_{number:03d}"
+
+
 def format_violation_id(number: int) -> str:
     return f"vio_{number:03d}"
