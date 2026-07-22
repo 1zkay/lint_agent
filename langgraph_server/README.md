@@ -24,9 +24,10 @@
 
 ```text
 langgraph_server/
-  agent_runtime.py                  # LangGraph Server graph factory 和缓存运行时
+  agent_runtime.py                  # LangGraph Server graph factory 和资源生命周期
   langgraph.json                    # LangGraph Server 配置
   lint_agent_cli.py                 # CLI 客户端，调用 Agent Server
+  response_parsing.py               # CLI 与批处理的消息响应契约
   lint-agent.cmd                    # Windows 命令入口
   lint_agent_eda_console.tcl        # EDA Tcl console HTTP 包装
   start_langgraph_agent_server.cmd  # 本地启动脚本
@@ -36,6 +37,7 @@ langgraph_server/
 
 ```text
 agent_runtime/
+  contracts.py                      # 跨运行时边界共享的名称契约
   configuration.py                  # LLM preset 解析
   middleware.py                     # create_deep_agent 入口、项目 middleware、interrupt_on 配置
   prompts.py                        # agent system prompt
@@ -285,6 +287,8 @@ customer-data/langgraph_api/
 ("users", user_id, "memories")           # 用户长期记忆条目，key 为 memory_id
 ```
 
+`langgraph.json` 通过 `store.index` 为长期记忆启用语义索引，只嵌入记忆条目的 `text` 字段。索引使用 `memory/server_embeddings.py` 暴露的嵌入对象，因此模型、OpenAI 兼容服务地址和密钥继续读取现有 `MEMORY_EMBED_*` 配置；JSON 中的 `dims` 必须与 `MEMORY_EMBED_DIMS` 一致。
+
 对于 CLI，`user_id` 默认是 `cli:<USERNAME>`，所以当前用户的长期记忆会挂在这个用户命名空间下。Agent 不应把源码、lint 原始报告、大段工具输出、密码或 API key 写入长期记忆。
 
 注意区分两条入口：
@@ -316,9 +320,11 @@ customer-data/langgraph_api/
 
 这个取舍保持 CLI 接近官方 thread/run/assistant 模型，同时避免引入不必要的管理面复杂度。
 
+CLI 为每轮用户消息分配唯一 ID，只接受该消息之后、不含待执行或解析失败工具调用的末尾 assistant 消息。批处理只接受唯一一次成功根因工作流调用，并从该 ToolMessage 的 `artifact.report_path` 读取报告路径，不扫描响应 JSON 或自然语言文本。
+
 ## 运行时结构
 
-`langgraph_server/agent_runtime.py` 启动时会做以下事情：
+`langgraph_server/agent_runtime.py` 在模块加载和 graph factory 执行期间会做以下事情：
 
 1. 应用 LangGraph dev persistence 兼容补丁：
    - `LINT_AGENT_PATCH_LANGGRAPH_DEV_PERSISTENCE=true`
@@ -341,7 +347,7 @@ customer-data/langgraph_api/
    - HITL via `create_deep_agent(interrupt_on=...)` when enabled
 6. 按配置使用 `FilesystemBackend` 或提供 `execute` 的 `LocalShellBackend`，并通过 `create_deep_agent(...)` 创建最终 agent。
 
-LLM、MCP session 和工具会在 Agent Server 进程内缓存，避免每个请求重复初始化。首次加载可能较慢，后续调用应复用缓存。
+每次实际 run 都在当前 graph factory 上下文内构建模型并加载工具；MCP session 等异步资源在同一上下文关闭，图结构或状态读取不会启动这些资源。
 
 ## 工具审批
 
@@ -455,7 +461,7 @@ lint-agent "继续这个 thread"
 - Chainlit Web UI：根目录 `chat_app.py`
 - LangGraph Agent Server：`langgraph_server/agent_runtime.py`
 - 两边共享 `agent_runtime/`、`memory/`、`rag/`、`llm/`、`compat/` 等模块
-- 两边生命周期不同：Chainlit 每个聊天会话有自己的 runtime owner；Agent Server 在进程内缓存 LLM/MCP/tools
+- 两边生命周期不同：Chainlit 每个聊天会话有自己的 runtime owner；Agent Server 由 graph factory 按实际 run 管理异步资源
 - 两边持久化路径不同：Chainlit 主要依赖 `.env` 中的 PostgreSQL/Chainlit data layer；本地 Agent Server dev 模式依赖 `.langgraph_api/`
 
 这种重复是有意保留的入口生命周期边界，不是业务逻辑重复。

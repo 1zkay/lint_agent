@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import atexit
 import logging
 import os
 import uuid
@@ -33,8 +32,6 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PROJECT_ROOT.parent
-_RUNTIME_COMPONENTS_LOCK: asyncio.Lock | None = None
-_RUNTIME_COMPONENTS: dict[str, Any] | None = None
 
 def _bool_env(key: str, default: bool, *, legacy_key: str | None = None) -> bool:
     raw = os.getenv(key)
@@ -79,15 +76,10 @@ def build_agent_context(
     )
 
 
-def _get_runtime_components_lock() -> asyncio.Lock:
-    global _RUNTIME_COMPONENTS_LOCK
+@asynccontextmanager
+async def lint_agent_graph(runtime: ServerRuntime | None = None) -> AsyncIterator[Any]:
+    """LangGraph Agent Server factory for the complete ALINT intelligent agent."""
 
-    if _RUNTIME_COMPONENTS_LOCK is None:
-        _RUNTIME_COMPONENTS_LOCK = asyncio.Lock()
-    return _RUNTIME_COMPONENTS_LOCK
-
-
-async def _build_cached_runtime_components() -> dict[str, Any]:
     config.validate()
     runtime_cfg = build_runtime_config_for_llm_preset()
     llm = build_llm_for_runtime_config(runtime_cfg)
@@ -99,91 +91,42 @@ async def _build_cached_runtime_components() -> dict[str, Any]:
         runtime_cfg,
         temperature=runtime_cfg.lint_root_cause_judge_temperature,
     )
-    exit_stack = AsyncExitStack()
-    try:
-        loaded_tools = await load_agent_tools(
-            exit_stack,
-            log_prefix="[agent_runtime]",
-        )
-    except Exception:
-        await exit_stack.aclose()
-        raise
-
-    return {
-        "exit_stack": exit_stack,
-        "llm": llm,
-        "candidate_llm": candidate_llm,
-        "judge_llm": judge_llm,
-        "ensemble_size": runtime_cfg.lint_root_cause_ensemble_size,
-        "tools": loaded_tools.tools,
-    }
-
-
-async def _get_cached_runtime_components() -> dict[str, Any]:
-    global _RUNTIME_COMPONENTS
-
-    if _RUNTIME_COMPONENTS is not None:
-        return _RUNTIME_COMPONENTS
-
-    async with _get_runtime_components_lock():
-        if _RUNTIME_COMPONENTS is None:
-            logger.info("[agent_runtime] Initializing cached runtime components.")
-            _RUNTIME_COMPONENTS = await _build_cached_runtime_components()
-        return _RUNTIME_COMPONENTS
-
-
-async def _close_cached_runtime_components() -> None:
-    global _RUNTIME_COMPONENTS
-
-    components = _RUNTIME_COMPONENTS
-    _RUNTIME_COMPONENTS = None
-    if components is not None:
-        await components["exit_stack"].aclose()
-
-
-def _close_cached_runtime_components_at_exit() -> None:
-    try:
-        asyncio.run(_close_cached_runtime_components())
-    except Exception:
-        logger.exception("[agent_runtime] Failed to close cached runtime components.")
-
-
-atexit.register(_close_cached_runtime_components_at_exit)
-
-
-@asynccontextmanager
-async def lint_agent_graph(runtime: ServerRuntime | None = None) -> AsyncIterator[Any]:
-    """LangGraph Agent Server factory for the complete ALINT intelligent agent."""
-
-    components = await _get_cached_runtime_components()
-    llm = components["llm"]
-    candidate_llm = components["candidate_llm"]
-    judge_llm = components["judge_llm"]
-    base_tools = components["tools"]
     store = getattr(runtime, "store", None) if runtime is not None else None
-    root_cause_tool = build_root_cause_workflow_tool(
-        llm,
-        base_tools,
-        candidate_llm=candidate_llm,
-        judge_llm=judge_llm,
-        ensemble_size=components["ensemble_size"],
-        root_dir=REPO_ROOT,
-        log_prefix="[agent_runtime:lint_root_cause]",
-    )
-    tools = [*base_tools, root_cause_tool]
+    is_execution = runtime is None or runtime.execution_runtime is not None
 
-    agent, _, _ = create_lint_deep_agent(
-        llm,
-        tools,
-        root_dir=REPO_ROOT,
-        log_prefix="[agent_runtime]",
-        system_prompt=SYSTEM_PROMPT,
-        store=store,
-        context_schema=AgentContext,
-        tool_retry_tools=base_tools,
-    )
+    async with AsyncExitStack() as exit_stack:
+        if is_execution:
+            loaded_tools = await load_agent_tools(
+                exit_stack,
+                log_prefix="[agent_runtime]",
+            )
+            base_tools = loaded_tools.tools
+        else:
+            base_tools = []
 
-    yield agent
+        root_cause_tool = build_root_cause_workflow_tool(
+            llm,
+            base_tools,
+            candidate_llm=candidate_llm,
+            judge_llm=judge_llm,
+            ensemble_size=runtime_cfg.lint_root_cause_ensemble_size,
+            root_dir=REPO_ROOT,
+            log_prefix="[agent_runtime:lint_root_cause]",
+        )
+        tools = [*base_tools, root_cause_tool]
+
+        agent, _, _ = create_lint_deep_agent(
+            llm,
+            tools,
+            root_dir=REPO_ROOT,
+            log_prefix="[agent_runtime]",
+            system_prompt=SYSTEM_PROMPT,
+            store=store,
+            context_schema=AgentContext,
+            tool_retry_tools=base_tools,
+        )
+
+        yield agent
 
 
 async def ainvoke_once(

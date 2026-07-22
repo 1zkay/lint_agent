@@ -7,17 +7,9 @@ from pathlib import Path
 from typing import Any
 
 import chainlit as cl
-from chainlit.chat_context import chat_context
 from chainlit.types import ThreadDict
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from agent_runtime.message_types import (
-    AIMessage,
-    AgentMessageObject,
-    HumanMessage,
-    RemoveMessage,
-    SystemMessage,
-)
+from agent_runtime.message_types import HumanMessage
 from workspace.path_resolver import to_project_relative_path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -107,32 +99,6 @@ def build_human_message_from_chainlit_message(message: cl.Message) -> HumanMessa
     return HumanMessage(content="\n\n".join(text_parts), id=message_id or None)
 
 
-def build_langchain_message_from_chainlit_history_message(
-    message: cl.Message,
-) -> AgentMessageObject | None:
-    message_type = str(getattr(message, "type", "") or "")
-    message_id = str(getattr(message, "id", "") or "")
-    content = str(getattr(message, "content", "") or "")
-
-    if message_type == "user_message":
-        return build_human_message_from_chainlit_message(message)
-    if message_type == "assistant_message":
-        return AIMessage(content=content, id=message_id or None)
-    if message_type == "system_message":
-        return SystemMessage(content=content, id=message_id or None)
-    return None
-
-
-def _chainlit_history_before_message(current_message_id: str) -> list[cl.Message]:
-    history = list(chat_context.get())
-    if not current_message_id:
-        return history
-    for idx, item in enumerate(history):
-        if str(getattr(item, "id", "") or "") == current_message_id:
-            return history[:idx]
-    return history
-
-
 def extract_seen_user_message_ids_from_thread(thread: ThreadDict) -> list[str]:
     seen_ids: list[str] = []
     for step in list(thread.get("steps", []) or []):
@@ -144,27 +110,33 @@ def extract_seen_user_message_ids_from_thread(thread: ThreadDict) -> list[str]:
     return seen_ids
 
 
-async def reset_agent_history_from_chainlit_context(
+async def find_checkpoint_before_message(
     agent: Any,
     thread_id: str,
-    current_message: cl.Message,
-) -> None:
-    prior_messages = []
-    for item in _chainlit_history_before_message(str(getattr(current_message, "id", "") or "")):
-        lc_message = build_langchain_message_from_chainlit_history_message(item)
-        if lc_message is not None:
-            prior_messages.append(lc_message)
+    message_id: str,
+) -> dict[str, Any]:
+    """Return the active-branch checkpoint immediately before a user message."""
+    target_id = str(message_id or "").strip()
+    if not target_id:
+        raise ValueError("message_id is required")
 
-    await agent.aupdate_state(
-        config={"configurable": {"thread_id": thread_id}},
-        values={
-            "messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *prior_messages],
-            "todos": [],
-        },
+    snapshot = await agent.aget_state(
+        {"configurable": {"thread_id": thread_id}}
     )
+    target_seen = False
+    while snapshot is not None:
+        values = getattr(snapshot, "values", {})
+        messages = values.get("messages", []) if isinstance(values, dict) else []
+        contains_target = any(
+            str(getattr(item, "id", "") or "") == target_id for item in messages
+        )
+        if target_seen and not contains_target:
+            return dict(snapshot.config)
+        target_seen = target_seen or contains_target
 
-    task_list = cl.user_session.get("task_list")
-    if task_list:
-        task_list.tasks.clear()
-        task_list.status = "Ready"
-        await task_list.send()
+        parent_config = getattr(snapshot, "parent_config", None)
+        if not parent_config:
+            break
+        snapshot = await agent.aget_state(parent_config)
+
+    raise RuntimeError(f"checkpoint not found before message {target_id}")

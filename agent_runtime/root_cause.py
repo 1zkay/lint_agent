@@ -8,6 +8,7 @@ from typing import Any
 from langchain.tools import ToolRuntime, tool
 from langchain_core.tools import BaseTool
 
+from agent_runtime.contracts import ROOT_CAUSE_WORKFLOW_TOOL_NAME
 from agent_runtime.middleware import create_lint_deep_agent
 from lint_root_cause_workflow import build_workflow
 from lint_root_cause_workflow.prompts import (
@@ -16,9 +17,6 @@ from lint_root_cause_workflow.prompts import (
     ROOT_CAUSE_JUDGE_SYSTEM_PROMPT,
 )
 from memory.long_term import AgentContext
-
-
-ROOT_CAUSE_WORKFLOW_TOOL_NAME = "run_lint_root_cause_workflow"
 
 
 def build_root_cause_workflow(

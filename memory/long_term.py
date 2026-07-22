@@ -302,7 +302,7 @@ def build_memory_tools() -> list[Any]:
     ]
 
 
-def _build_memory_embeddings(cfg: Any) -> OpenAIEmbeddings:
+def build_memory_embeddings(cfg: Any) -> OpenAIEmbeddings:
     kwargs: dict[str, Any] = {
         "model": cfg.memory_embed_model,
         "base_url": cfg.memory_embed_base_url,
@@ -324,7 +324,7 @@ async def _resolve_memory_index_config(cfg: Any) -> dict[str, Any] | None:
     if not cfg.memory_enable_semantic_search:
         return None
 
-    embeddings = _build_memory_embeddings(cfg)
+    embeddings = build_memory_embeddings(cfg)
     dims = int(getattr(cfg, "memory_embed_dims", 0) or 0)
     if dims <= 0:
         probe = await embeddings.aembed_query("memory dimension probe")
@@ -342,7 +342,7 @@ async def _resolve_memory_index_config(cfg: Any) -> dict[str, Any] | None:
     return {
         "embed": embeddings,
         "dims": dims,
-        "fields": ["$"],
+        "fields": ["text"],
     }
 
 

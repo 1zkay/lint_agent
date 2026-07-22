@@ -3,5 +3,12 @@
   "graphs": {
     "lint": "./langgraph_server/agent_runtime.py:lint_agent_graph"
   },
+  "store": {
+    "index": {
+      "embed": "./memory/server_embeddings.py:memory_embeddings",
+      "dims": 1536,
+      "fields": ["text"]
+    }
+  },
   "python_version": "3.12"
 }

@@ -11,6 +11,14 @@ import uuid
 from typing import Any
 
 from langgraph_sdk import get_sync_client
+from langgraph_server.response_parsing import (
+    ResponseContractError,
+    field as _field,
+    final_assistant_text,
+    message_role as _message_role,
+    message_text as _message_text,
+    messages_from_state as _messages_from_state,
+)
 
 EXIT_COMMANDS = {"/exit", "/quit", "exit", "quit", "q"}
 _ENSURED_THREAD_KEYS: set[tuple[str, str, str, str]] = set()
@@ -18,45 +26,6 @@ _ENSURED_THREAD_KEYS: set[tuple[str, str, str, str]] = set()
 
 def _resolve_user_id(args: argparse.Namespace) -> str:
     return args.user_id or f"cli:{os.getenv('USERNAME') or os.getenv('USER') or 'anonymous'}"
-
-
-def _field(value: Any, key: str, default: Any = None) -> Any:
-    if isinstance(value, dict):
-        return value.get(key, default)
-    return getattr(value, key, default)
-
-
-def _message_text(message: Any) -> str:
-    content = _field(message, "content", "")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict):
-                text = item.get("text") or item.get("content")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "".join(parts)
-    return str(content) if content else ""
-
-
-def _last_ai_text(state: Any) -> str:
-    messages = _field(state, "messages", None)
-    if not isinstance(messages, list) or not messages:
-        values = _field(state, "values", {}) or {}
-        nested_messages = values.get("messages", []) if isinstance(values, dict) else _field(values, "messages", [])
-        if isinstance(nested_messages, list):
-            messages = nested_messages
-    if not isinstance(messages, list):
-        return ""
-    for message in reversed(messages):
-        msg_type = str(_field(message, "type", "") or _field(message, "role", "")).lower()
-        if msg_type in {"ai", "assistant"}:
-            text = _message_text(message).strip()
-            if text:
-                return text
-    return ""
 
 
 def _json_text(value: Any) -> str:
@@ -406,19 +375,6 @@ def _list_threads(client: Any, args: argparse.Namespace, context: dict[str, Any]
     print("use /resume <thread_id> to switch")
 
 
-def _messages_from_state(state: Any) -> list[Any]:
-    values = _field(state, "values", {}) or {}
-    if isinstance(values, dict):
-        messages = values.get("messages", [])
-    else:
-        messages = _field(values, "messages", [])
-    return messages if isinstance(messages, list) else []
-
-
-def _message_role(message: Any) -> str:
-    return str(_field(message, "type", "") or _field(message, "role", "") or "message")
-
-
 def _preview_text(text: str, *, limit: int = 100) -> str:
     collapsed = " ".join(text.split())
     return collapsed[:limit] + ("..." if len(collapsed) > limit else "")
@@ -609,7 +565,10 @@ def _show_schemas(client: Any, args: argparse.Namespace) -> None:
 
 def _run_wait(client: Any, args: argparse.Namespace, prompt: str, context: dict[str, Any]) -> int:
     _ensure_thread(client, args, context)
-    input_payload = {"messages": [{"role": "user", "content": prompt}]}
+    input_message_id = str(uuid.uuid4())
+    input_payload = {
+        "messages": [{"role": "user", "content": prompt, "id": input_message_id}]
+    }
     state = client.runs.wait(
         args.thread_id,
         args.assistant,
@@ -633,14 +592,19 @@ def _run_wait(client: Any, args: argparse.Namespace, prompt: str, context: dict[
             )
             continue
 
-        text = _last_ai_text(state)
-        if text:
-            print(text)
-            return 0
+        try:
+            text = final_assistant_text(state, after_message_id=input_message_id)
+        except ResponseContractError as exc:
+            print(
+                f"lint-agent received no final assistant message for this turn: {exc}",
+                file=sys.stderr,
+            )
+            print("raw state follows:", file=sys.stderr)
+            print(_json_text(state), file=sys.stderr)
+            return 1
 
-        print("lint-agent did not receive an assistant message; raw state follows:", file=sys.stderr)
-        print(_json_text(state))
-        return 1
+        print(text)
+        return 0
 
 
 def _handle_slash_command(

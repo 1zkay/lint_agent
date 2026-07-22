@@ -6,7 +6,7 @@ LANGGRAPH_ASSISTANT="${LANGGRAPH_ASSISTANT:-lint}"
 LANGGRAPH_RECURSION_LIMIT="${LANGGRAPH_RECURSION_LIMIT:-1000}"
 LINT_AGENT_BATCH_TIMEOUT="${LINT_AGENT_BATCH_TIMEOUT:-7200}"
 LINT_AGENT_BATCH_JOBS="${LINT_AGENT_BATCH_JOBS:-1}"
-AGENT_DISPLAY_VERSION="v11"
+AGENT_DISPLAY_VERSION="v12"
 
 batch_jobs="$LINT_AGENT_BATCH_JOBS"
 output_dir=""
@@ -392,62 +392,24 @@ format_candidates() {
   return 0
 }
 
-collect_report_paths_from_response() {
+parse_report_path_from_response() {
   local response_file="$1"
-  local path
-  local existing
-  local duplicate
-  local absolute_found=0
-  local paths=()
+  local input_message_id="$2"
 
-  while IFS= read -r path; do
-    duplicate=0
-    for existing in "${paths[@]}"; do
-      if [[ "$existing" == "$path" ]]; then
-        duplicate=1
-        break
-      fi
-    done
-    [[ "$duplicate" == "1" ]] || paths+=("$path")
-  done < <(
-    grep -Eao '(/[^"[:space:]\\]*/)?reports/[A-Za-z0-9._-]+_root_cause_[0-9]{8}_[0-9]{6}\.csv' "$response_file" || true
-  )
-
-  if [[ "${#paths[@]}" -eq 0 ]]; then
-    return 1
-  fi
-
-  for path in "${paths[@]}"; do
-    if [[ "$path" == /* ]]; then
-      absolute_found=1
-      break
-    fi
-  done
-
-  for path in "${paths[@]}"; do
-    if [[ "$absolute_found" == "1" && "$path" != /* ]]; then
-      continue
-    fi
-    printf '%s\n' "$path"
-  done
+  "$response_parser_python" -m langgraph_server.response_parsing \
+    batch-response "$response_file" \
+    --after-message-id "$input_message_id"
 }
 
-print_report_paths_from_response() {
-  local response_file="$1"
-  local path
+print_report_path() {
+  local path="$1"
   local report_path
-  local found=0
 
-  while IFS= read -r path; do
-    found=1
-    report_path="$path"
-    if [[ -n "$output_dir" ]]; then
-      report_path="$output_dir/$(basename "$path")"
-    fi
-    printf 'report: %s\n' "$(display_path "$report_path")"
-  done < <(collect_report_paths_from_response "$response_file")
-
-  [[ "$found" == "1" ]]
+  report_path="$path"
+  if [[ -n "$output_dir" ]]; then
+    report_path="$output_dir/$(basename "$path")"
+  fi
+  printf 'report: %s\n' "$(display_path "$report_path")"
 }
 
 resolve_report_copy_source() {
@@ -488,41 +450,26 @@ resolve_report_copy_source() {
   return 1
 }
 
-copy_report_paths_to_output_dir() {
-  local response_file="$1"
-  local path
+copy_report_path_to_output_dir() {
+  local path="$1"
   local source
   local source_abs
   local target
-  local found=0
-  local failed=0
 
   [[ -n "$output_dir" ]] || return 0
 
-  while IFS= read -r path; do
-    found=1
-    if ! source="$(resolve_report_copy_source "$path")"; then
-      warn "could not copy report; generated CSV is not readable: $(display_path "$path")"
-      failed=1
-      continue
-    fi
+  if ! source="$(resolve_report_copy_source "$path")"; then
+    warn "could not copy report; generated CSV is not readable: $(display_path "$path")"
+    return 1
+  fi
 
-    source_abs="$(cd "$(dirname "$source")" && pwd -P)/$(basename "$source")"
-    target="$output_dir/$(basename "$path")"
-    if [[ "$source_abs" != "$target" ]]; then
-      if ! cp -f "$source_abs" "$target"; then
-        warn "failed to copy report to $(display_path "$target")"
-        failed=1
-        continue
-      fi
-    fi
-    if ! normalize_output_report_permissions "$target"; then
-      failed=1
-      continue
-    fi
-  done < <(collect_report_paths_from_response "$response_file")
-
-  [[ "$found" == "1" && "$failed" == "0" ]]
+  source_abs="$(cd "$(dirname "$source")" && pwd -P)/$(basename "$source")"
+  target="$output_dir/$(basename "$path")"
+  if [[ "$source_abs" != "$target" ]] && ! cp -f "$source_abs" "$target"; then
+    warn "failed to copy report to $(display_path "$target")"
+    return 1
+  fi
+  normalize_output_report_permissions "$target"
 }
 
 normalize_output_report_permissions() {
@@ -583,8 +530,9 @@ latest_run_id_for_thread() {
   response="$(curl -fsS --max-time 5 \
     -H 'Accept: application/json' \
     "${LANGGRAPH_URL%/}/threads/$thread_id/runs?limit=1" 2>/dev/null || true)"
-  run_id="$(printf '%s' "$response" | tr -d '\n' | sed -E 's/.*"run_id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')"
-  [[ "$run_id" =~ ^[0-9a-fA-F-]{36}$ ]] || return 1
+  run_id="$(printf '%s' "$response" | \
+    "$response_parser_python" -m langgraph_server.response_parsing latest-run-id \
+      2>/dev/null)" || return 1
   printf '%s' "$run_id"
 }
 
@@ -663,13 +611,15 @@ build_run_json() {
   local user_id="$2"
   local authenticated="$3"
   local prompt="$4"
+  local input_message_id="$5"
   local metadata context
 
   metadata="$(build_metadata_json "$user_id" "$authenticated")"
   context="$(build_context_json "$thread_id" "$user_id" "$authenticated")"
-  printf '{"assistant_id":"%s","input":{"messages":[{"role":"user","content":"%s"}]},"metadata":%s,"context":%s,"if_not_exists":"create","config":{"recursion_limit":%s},"on_disconnect":"cancel","durability":"exit"}' \
+  printf '{"assistant_id":"%s","input":{"messages":[{"role":"user","content":"%s","id":"%s"}]},"metadata":%s,"context":%s,"if_not_exists":"create","config":{"recursion_limit":%s},"on_disconnect":"cancel","durability":"exit"}' \
     "$(json_escape "$LANGGRAPH_ASSISTANT")" \
     "$(json_escape "$prompt")" \
+    "$(json_escape "$input_message_id")" \
     "$metadata" \
     "$context" \
     "$LANGGRAPH_RECURSION_LIMIT"
@@ -696,6 +646,7 @@ start_job() {
   local source_path="${source_paths[index]}"
   local stem="${stems[index]}"
   local thread_id
+  local input_message_id
   local response_file
   local request_file
   local status_file
@@ -704,6 +655,7 @@ start_job() {
   local run_body
 
   thread_id="$(new_uuid)"
+  input_message_id="$(new_uuid)"
   response_file="$log_dir/${stem}.${thread_id}.response.json"
   request_file="$log_dir/${stem}.${thread_id}.request.json"
   status_file="$log_dir/${stem}.${thread_id}.status"
@@ -719,7 +671,7 @@ start_job() {
     warn "failed to pre-create thread metadata for $stem; will still submit the run."
   fi
 
-  run_body="$(build_run_json "$thread_id" "$user_id" "$authenticated" "$prompt")"
+  run_body="$(build_run_json "$thread_id" "$user_id" "$authenticated" "$prompt" "$input_message_id")"
   printf '%s\n' "$run_body" >"$request_file"
 
   submitted_thread_ids[index]="$thread_id"
@@ -727,6 +679,7 @@ start_job() {
   run_finished[index]=0
   job_response_files[index]="$response_file"
   job_status_files[index]="$status_file"
+  job_input_message_ids[index]="$input_message_id"
   job_finalized[index]=0
 
   wait_run_to_file "$thread_id" "$run_body" "$response_file" "$status_file" &
@@ -741,6 +694,7 @@ finalize_done_jobs() {
   local finalized_any=1
   local response_file
   local status_file
+  local report_path
 
   for index in "${!run_pids[@]}"; do
     [[ "${job_finalized[index]:-0}" == "1" ]] && continue
@@ -761,22 +715,17 @@ finalize_done_jobs() {
     fi
 
     response_file="${job_response_files[index]}"
-    if grep -q '"__interrupt__"' "$response_file"; then
-      warn "agent returned a tool-approval interrupt for ${submitted_stems[index]}. Disable AGENT_TOOL_APPROVAL_ENABLED for batch mode or use the Python CLI with --auto-approve."
-      warn "response log: $(display_path "$response_file")"
+    if ! report_path="$(parse_report_path_from_response \
+      "$response_file" "${job_input_message_ids[index]}")"; then
+      warn "invalid or incomplete agent response for ${submitted_stems[index]}. Response log: $(display_path "$response_file")"
       failure_count=$((failure_count + 1))
       continue
     fi
 
     printf '\ncompleted: %s\n' "${submitted_stems[index]}"
     printf 'assistant response saved: %s\n' "$(display_path "$response_file")"
-    if ! print_report_paths_from_response "$response_file"; then
-      warn "could not find output CSV path for ${submitted_stems[index]}. Response log: $(display_path "$response_file")"
-      if [[ -n "$output_dir" ]]; then
-        failure_count=$((failure_count + 1))
-        continue
-      fi
-    elif ! copy_report_paths_to_output_dir "$response_file"; then
+    print_report_path "$report_path"
+    if ! copy_report_path_to_output_dir "$report_path"; then
       failure_count=$((failure_count + 1))
       continue
     fi
@@ -802,8 +751,14 @@ require_command mkdir
 require_command stat
 require_command chown
 require_command chmod
-require_command sed
 require_command tr
+if command -v python3 >/dev/null 2>&1; then
+  response_parser_python="python3"
+elif command -v python >/dev/null 2>&1; then
+  response_parser_python="python"
+else
+  die "python3 or python is required to parse Agent Server responses."
+fi
 
 [[ "$LANGGRAPH_RECURSION_LIMIT" =~ ^[0-9]+$ ]] || die "LANGGRAPH_RECURSION_LIMIT must be an integer."
 [[ "$LINT_AGENT_BATCH_TIMEOUT" =~ ^[0-9]+$ ]] || die "LINT_AGENT_BATCH_TIMEOUT must be an integer number of seconds."
@@ -894,6 +849,7 @@ run_finished=()
 run_pids=()
 job_response_files=()
 job_status_files=()
+job_input_message_ids=()
 job_finalized=()
 active_jobs=0
 next_index=0

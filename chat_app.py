@@ -16,8 +16,8 @@ ALINT-PRO Chainlit 聊天应用（MCP Client + create_deep_agent 版）
           来源: https://docs.langchain.com/oss/python/deepagents/human-in-the-loop
   MCP    : AsyncExitStack + client.session("name") + load_mcp_tools(session)
           来源: https://github.com/langchain-ai/langchain-mcp-adapters README
-  状态写回: agent.aupdate_state(config={"configurable":{"thread_id":...}}, values={"messages":[...]})
-          来源: https://docs.langchain.com/oss/python/langgraph/persistence
+  历史编辑: 从目标消息之前的 checkpoint 分叉执行
+          来源: https://docs.langchain.com/oss/python/langgraph/use-time-travel
 
 多轮历史：由 checkpointer（postgres/memory）按 thread_id 自动管理。
   每轮只传当前 HumanMessage；history（含 ToolMessage）由 checkpointer 追加累积。
@@ -67,7 +67,7 @@ from app.chainlit_hitl import (
 from app.chainlit_messages import (
     build_human_message_from_chainlit_message as _build_human_message_from_chainlit_message,
     extract_seen_user_message_ids_from_thread as _extract_seen_user_message_ids_from_thread,
-    reset_agent_history_from_chainlit_context as _reset_agent_history_from_chainlit_context,
+    find_checkpoint_before_message as _find_checkpoint_before_message,
 )
 from app.chainlit_streaming import (
     message_preview as _message_preview,
@@ -88,12 +88,13 @@ from app.chainlit_runtime import (
     resolve_agent_context as _resolve_agent_context,
     stop_runtime_owner as _stop_runtime_owner,
 )
+from agent_runtime.contracts import ROOT_CAUSE_WORKFLOW_TOOL_NAME
 from agent_runtime.message_types import (
+    AIMessage,
     HumanMessage,
     message_text as _message_text,
     message_tool_calls as _message_tool_calls,
 )
-from agent_runtime.root_cause import ROOT_CAUSE_WORKFLOW_TOOL_NAME
 from config import config
 
 logger = logging.getLogger(__name__)
@@ -268,44 +269,26 @@ async def on_message(message: cl.Message):
         logger.warning(f"[chat_app] 构造上传消息失败，回退纯文本输入: {e}")
         user_human_message = HumanMessage(content=str(message.content or ""), id=current_message_id or None)
 
-    if is_message_edit:
-        await _reset_agent_history_from_chainlit_context(agent, thread_id, message)
-
     # 每轮只传当前消息——历史由 checkpointer 按 thread_id 自动追加管理
     agent_context = cl.user_session.get("agent_context") or _resolve_agent_context(thread_id)
-    run_config = {
+    latest_thread_config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": config.agent_recursion_limit,
     }
+    run_config = latest_thread_config
 
     # ── 流式处理（v3 typed projections）────────────────────────────────────
     # 官方标准参考：https://docs.langchain.com/oss/python/langchain/event-streaming
     # run.messages 负责 token；create_deep_agent 内置 ToolCallTransformer 提供 run.tool_calls。
-    # UpdatesTransformer 显式开启 run.updates，用于同步 todos 和最终回答状态。
+    # UpdatesTransformer 显式开启 run.updates，用于同步 todos 和非模型节点状态。
     # ─────────────────────────────────────────────────────────────────────────
-    response_msg = cl.Message(content="")
-    await response_msg.send()
     task_list = cl.user_session.get("task_list")
     if task_list:
         task_list.tasks.clear()
         task_list.status = "Ready"
         await task_list.send()
 
-    llm_step_by_node: dict[str, cl.Step] = {}
-    llm_output_by_node: dict[str, str] = {}
-    _model_text_buffer: str = ""       # 当前轮缓冲，确认无真实工具调用后写入 response_msg
-    _write_todos_text_fallback: str = ""  # write_todos 同轮文字，用于后续空终止轮兜底
     _reported_usage_message_keys: set[str] = set()
-
-    async def _ensure_llm_step(node_name: str) -> cl.Step:
-        llm_step = llm_step_by_node.get(node_name)
-        if llm_step is not None:
-            return llm_step
-        llm_step = cl.Step(name=_step_name("llm", node_name), type="llm")
-        await llm_step.send()
-        llm_step_by_node[node_name] = llm_step
-        llm_output_by_node[node_name] = ""
-        return llm_step
 
     def _usage_message_key(message: Any) -> str:
         message_id = str(getattr(message, "id", "") or "").strip()
@@ -338,24 +321,35 @@ async def on_message(message: cl.Message):
         return _token_usage_generation(message, usage), _token_usage_summary(usage)
 
     async def _consume_v3_message_stream(message_stream: Any) -> None:
-        nonlocal _model_text_buffer
-
         node_name = str(getattr(message_stream, "node", None) or "model")
-        llm_step = await _ensure_llm_step(node_name)
+        output_buffer = ""
 
-        async def _consume_text() -> None:
-            nonlocal _model_text_buffer
-
+        async with cl.Step(name=_step_name("llm", node_name), type="llm") as llm_step:
             async for token_text in message_stream.text:
                 token_text = str(token_text or "")
                 if not token_text:
                     continue
+                output_buffer += token_text
                 await llm_step.stream_token(token_text)
-                llm_output_by_node[node_name] += token_text
-                if node_name == "model":
-                    _model_text_buffer += token_text
 
-        await _consume_text()
+            output_message = await message_stream.output
+            usage_generation, usage_summary = await _record_message_token_usage(
+                output_message
+            )
+            if usage_generation is not None:
+                llm_step.generation = usage_generation
+
+            summary = (
+                output_buffer
+                or _message_preview(output_message)
+                or _tool_call_summary(_message_tool_calls(output_message))
+            )
+            if summary and not output_buffer:
+                llm_step.output = summary
+            if usage_summary:
+                llm_step.output = _append_usage_summary(
+                    llm_step.output or summary, usage_summary
+                )
 
     async def _consume_v3_messages(run: Any) -> None:
         async for message_stream in run.messages:
@@ -562,8 +556,6 @@ async def on_message(message: cl.Message):
             await asyncio.gather(*subagent_tasks)
 
     async def _process_v3_update_data(data: Any) -> None:
-        nonlocal _model_text_buffer, _write_todos_text_fallback
-
         if not isinstance(data, dict):
             return
 
@@ -575,56 +567,9 @@ async def on_message(message: cl.Message):
             if todos_update is not None:
                 await _sync_todos_to_tasklist(todos_update)
 
-            msgs = update.get("messages")
-            last_msg = msgs[-1] if msgs else None
-            usage_generation = None
-            usage_summary = ""
-            if last_msg is not None:
-                usage_generation, usage_summary = await _record_message_token_usage(last_msg)
-
-            llm_step = llm_step_by_node.pop(source, None)
-            if llm_step:
-                if usage_generation is not None:
-                    llm_step.generation = usage_generation
-
-                llm_output = llm_output_by_node.pop(source, "")
-                summary = llm_output
-                if last_msg is not None and not summary:
-                    summary = _message_preview(last_msg) or _tool_call_summary(
-                        _message_tool_calls(last_msg)
-                    )
-                if usage_summary:
-                    summary = _append_usage_summary(summary, usage_summary)
-                if summary and not llm_output:
-                    llm_step.output = summary
-                elif usage_summary:
-                    llm_step.output = _append_usage_summary(llm_step.output or "", usage_summary)
-                await llm_step.update()
-                if source not in {"model", "tools"}:
-                    continue
-
-            if source == "model":
-                if not last_msg:
-                    continue
-
-                tool_calls = _message_tool_calls(last_msg)
-                if tool_calls:
-                    # write_todos 是 UI 元工具：同轮文字暂存为兜底，供后续空终止轮使用。
-                    # 有其他真实工具调用时丢弃缓冲（中间思考不展示给用户）。
-                    if all(str(tc.get("name") or "") == "write_todos" for tc in tool_calls):
-                        _write_todos_text_fallback = _model_text_buffer
-                    _model_text_buffer = ""
-                else:
-                    # 本轮无工具调用（最终回答轮）：写入缓冲文字；
-                    # 若模型输出为空（write_todos 同轮已输出回复），用 fallback 兜底。
-                    final_text = _model_text_buffer or _write_todos_text_fallback
-                    if final_text:
-                        response_msg.content = final_text
-                        await response_msg.update()
-                    _model_text_buffer = ""
-                    _write_todos_text_fallback = ""
-
-            elif _should_show_run_step(source):
+            if _should_show_run_step(source):
+                msgs = update.get("messages")
+                last_msg = msgs[-1] if msgs else None
                 step = cl.Step(name=_step_name("run", source), type="run")
                 step.output = _update_preview(update) or (
                     _message_preview(last_msg) if last_msg is not None else f"Node `{source}` completed"
@@ -637,6 +582,15 @@ async def on_message(message: cl.Message):
             await _process_v3_update_data(data)
 
     try:
+        if is_message_edit:
+            checkpoint_config = await _find_checkpoint_before_message(
+                agent, thread_id, current_message_id
+            )
+            run_config = {
+                **checkpoint_config,
+                "recursion_limit": config.agent_recursion_limit,
+            }
+
         pending_input = {"messages": [user_human_message]}
         while True:
             hitl_request = None
@@ -655,28 +609,34 @@ async def on_message(message: cl.Message):
                 )
                 if await run.interrupted():
                     hitl_request = _extract_hitl_request_from_interrupts(await run.interrupts())
+                else:
+                    final_state = await run.output()
+                    messages = (
+                        final_state.get("messages")
+                        if isinstance(final_state, Mapping)
+                        else None
+                    )
+                    final_message = messages[-1] if messages else None
+                    if (
+                        isinstance(final_message, AIMessage)
+                        and not _message_tool_calls(final_message)
+                    ):
+                        final_text = _message_text(final_message)
+                        if final_text:
+                            await cl.Message(content=final_text).send()
 
+            if hitl_request:
+                run_config = latest_thread_config
             if not hitl_request:
                 break
 
             resume_payload = await _ask_hitl_resume_payload(hitl_request)
             pending_input = Command(resume=resume_payload)
             await cl.Message(content="🛂 已提交审批决策，继续执行...").send()
-            response_msg = cl.Message(content="")
-            await response_msg.send()
 
     except Exception as e:
-        response_msg.content += f"\n\n[错误: {e}]"
-        await response_msg.update()
+        await cl.Message(content=f"[错误: {e}]").send()
         logger.error(f"[chat_app] Agent stream failed: {e}", exc_info=True)
-    finally:
-        for llm_step in llm_step_by_node.values():
-            try:
-                await llm_step.update()
-            except Exception:
-                pass
-
-    await response_msg.update()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
