@@ -288,6 +288,8 @@ async def on_message(message: cl.Message):
         task_list.status = "Ready"
         await task_list.send()
 
+    final_response = await cl.Message(content="").send()
+
     _reported_usage_message_keys: set[str] = set()
 
     def _usage_message_key(message: Any) -> str:
@@ -617,13 +619,17 @@ async def on_message(message: cl.Message):
                         else None
                     )
                     final_message = messages[-1] if messages else None
+                    final_text = ""
                     if (
                         isinstance(final_message, AIMessage)
                         and not _message_tool_calls(final_message)
                     ):
                         final_text = _message_text(final_message)
-                        if final_text:
-                            await cl.Message(content=final_text).send()
+                    if final_text:
+                        final_response.content = final_text
+                        await final_response.update()
+                    else:
+                        await final_response.remove()
 
             if hitl_request:
                 run_config = latest_thread_config
@@ -635,7 +641,8 @@ async def on_message(message: cl.Message):
             await cl.Message(content="🛂 已提交审批决策，继续执行...").send()
 
     except Exception as e:
-        await cl.Message(content=f"[错误: {e}]").send()
+        final_response.content = f"[错误: {e}]"
+        await final_response.update()
         logger.error(f"[chat_app] Agent stream failed: {e}", exc_info=True)
 
 
