@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
-import sys
 from collections.abc import Mapping
 from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
@@ -18,11 +16,10 @@ from deepagents import (
 )
 from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
+from deepagents.backends.local_shell import LocalShellBackend
 from deepagents.middleware import filesystem as deepagents_filesystem
 from langchain.agents.middleware import (
-    HostExecutionPolicy,
     ModelRetryMiddleware,
-    ShellToolMiddleware,
     ToolRetryMiddleware,
 )
 
@@ -150,17 +147,6 @@ def normalize_skill_sources(sources: list[str], root_dir: str | Path) -> list[st
     return deduped_sources
 
 
-def resolve_shell_command() -> tuple[str, ...] | None:
-    """Resolve the shell command used by ShellToolMiddleware."""
-    if os.name == "nt":
-        git_bash = r"C:\Program Files\Git\bin\bash.exe"
-        if os.path.isfile(git_bash):
-            return (git_bash,)
-        bash = shutil.which("bash")
-        return (bash,) if bash else None
-    return ("/bin/bash",)
-
-
 def _build_deep_agent_system_prompt(system_prompt: str) -> str:
     parts = [
         system_prompt,
@@ -171,8 +157,19 @@ def _build_deep_agent_system_prompt(system_prompt: str) -> str:
 
 def _build_deep_agent_backend(root_path: Path) -> CompositeBackend:
     """Route DeepAgents artifacts under the project while preserving native paths."""
+    default_backend = (
+        LocalShellBackend(
+            root_dir=str(root_path),
+            virtual_mode=False,
+            timeout=config.shell_command_timeout,
+            max_output_bytes=config.shell_max_output_bytes,
+            inherit_env=True,
+        )
+        if config.agent_enable_shell
+        else FilesystemBackend(root_dir=str(root_path), virtual_mode=False)
+    )
     return CompositeBackend(
-        default=FilesystemBackend(root_dir=str(root_path), virtual_mode=False),
+        default=default_backend,
         routes={
             "/conversation_history/": FilesystemBackend(
                 root_dir=str(root_path / "conversation_history"),
@@ -224,16 +221,12 @@ def disable_default_general_purpose_subagent(llm: Any, *, log_prefix: str) -> bo
 def _build_project_middleware(
     llm: Any,
     *,
-    root_dir: str | Path,
     log_prefix: str,
     tool_retry_tools: list[Any] | None = None,
-    disable_shell_if_unavailable: bool = False,
     model_retry_on_failure: Literal["continue", "error"] = "continue",
-) -> tuple[list[Any], list[str]]:
+) -> list[Any]:
     """Build project-specific middleware added after the DeepAgents base stack."""
-    root_path = Path(root_dir).resolve()
     middleware_stack: list[Any] = []
-    runtime_tool_names: list[str] = []
 
     if config.agent_enable_reflection:
         middleware_stack.append(
@@ -267,40 +260,7 @@ def _build_project_middleware(
         )
         logger.info("%s ToolRetryMiddleware enabled (max_retries=%s)", log_prefix, config.agent_tool_retry_max)
 
-    if config.agent_enable_shell:
-        shell_command = resolve_shell_command()
-        if shell_command:
-            py_exe = sys.executable.replace("\\", "/")
-            middleware_stack.append(
-                ShellToolMiddleware(
-                    workspace_root=config.shell_workspace_root or str(root_path),
-                    shell_command=shell_command,
-                    startup_commands=(
-                        'printf() { [[ "$1" == __LC_SHELL_DONE__* ]] && '
-                        'builtin printf "\\n"; builtin printf "$@"; }',
-                        f'python()  {{ "{py_exe}" "$@"; }}',
-                        f'python3() {{ "{py_exe}" "$@"; }}',
-                        f'pip()     {{ "{py_exe}" -m pip "$@"; }}',
-                    ),
-                    execution_policy=HostExecutionPolicy(
-                        command_timeout=config.shell_command_timeout,
-                        max_output_lines=config.shell_max_output_lines,
-                    ),
-                )
-            )
-            runtime_tool_names.append("shell")
-            logger.info(
-                "%s ShellToolMiddleware enabled (workspace=%s, timeout=%ss)",
-                log_prefix,
-                config.shell_workspace_root or root_path,
-                config.shell_command_timeout,
-            )
-        else:
-            logger.warning("%s ShellToolMiddleware disabled: bash not found.", log_prefix)
-            if disable_shell_if_unavailable:
-                config.agent_enable_shell = False
-
-    return middleware_stack, runtime_tool_names
+    return middleware_stack
 
 
 def create_lint_deep_agent(
@@ -315,7 +275,6 @@ def create_lint_deep_agent(
     context_schema: type[Any] | None = None,
     name: str | None = None,
     tool_retry_tools: list[Any] | None = None,
-    disable_shell_if_unavailable: bool = False,
     model_retry_on_failure: Literal["continue", "error"] = "continue",
 ) -> tuple[Any, list[str], list[str]]:
     """Create the ALINT agent through the official DeepAgents entrypoint."""
@@ -364,14 +323,23 @@ def create_lint_deep_agent(
     if guarded_tools:
         logger.info("%s create_deep_agent tool approval enabled for: %s", log_prefix, guarded_tools)
 
-    middleware_stack, runtime_tool_names = _build_project_middleware(
+    middleware_stack = _build_project_middleware(
         llm,
-        root_dir=root_path,
         log_prefix=log_prefix,
         tool_retry_tools=tool_retry_tools,
-        disable_shell_if_unavailable=disable_shell_if_unavailable,
         model_retry_on_failure=model_retry_on_failure,
     )
+    backend = _build_deep_agent_backend(root_path)
+    runtime_tool_names = (
+        ["execute"] if deepagents_filesystem.supports_execution(backend) else []
+    )
+    if runtime_tool_names:
+        logger.info(
+            "%s LocalShellBackend enabled (workspace=%s, timeout=%ss)",
+            log_prefix,
+            root_path,
+            config.shell_command_timeout,
+        )
 
     agent = create_deep_agent(
         model=llm,
@@ -380,7 +348,7 @@ def create_lint_deep_agent(
         middleware=middleware_stack,
         subagents=subagents,
         skills=skill_sources,
-        backend=_build_deep_agent_backend(root_path),
+        backend=backend,
         interrupt_on=interrupt_on,
         checkpointer=checkpointer,
         store=store,

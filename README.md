@@ -34,8 +34,8 @@ Chainlit Web UI
   |
   v
 DeepAgents create_deep_agent
-  |-- Official base: todo, filesystem, skills, subagents, summarization, patching
-  |-- Project middleware: retry, reflection, shell
+  |-- Official base: todo, filesystem, execute, skills, subagents, summarization, patching
+  |-- Project middleware: retry, reflection
   |-- HITL: create_deep_agent(interrupt_on=...)
   |-- Native workflow tool: run_lint_root_cause_workflow
   |-- Memory tools

@@ -253,9 +253,8 @@ class Config:
         self.agent_enable_tool_retry = self._bool_env("AGENT_ENABLE_TOOL_RETRY", "true")
         self.agent_tool_retry_max = int(os.getenv("AGENT_TOOL_RETRY_MAX", "2"))
         self.agent_enable_shell = self._bool_env("AGENT_ENABLE_SHELL", "false")
-        self.shell_workspace_root = os.getenv("SHELL_WORKSPACE_ROOT", "").strip()
-        self.shell_command_timeout = float(os.getenv("SHELL_COMMAND_TIMEOUT", "30"))
-        self.shell_max_output_lines = int(os.getenv("SHELL_MAX_OUTPUT_LINES", "200"))
+        self.shell_command_timeout = int(os.getenv("SHELL_COMMAND_TIMEOUT", "30"))
+        self.shell_max_output_bytes = int(os.getenv("SHELL_MAX_OUTPUT_BYTES", "100000"))
         self.agent_enable_subagents = self._bool_env("AGENT_ENABLE_SUBAGENTS", "true")
         self.agent_enable_skills = self._bool_env("AGENT_ENABLE_SKILLS", "false")
         self.agent_skills_dirs = [
@@ -270,7 +269,7 @@ class Config:
                 self.agent_skills_dirs.append(extra_dir)
         self.agent_tool_approval_enabled = self._bool_env("AGENT_TOOL_APPROVAL_ENABLED", "true")
         self.agent_approval_tool_names: tuple[str, ...] = (
-            "write_file", "edit_file", "shell"
+            "write_file", "edit_file", "execute"
         )
         self.agent_hitl_timeout = int(os.getenv("AGENT_HITL_TIMEOUT", "600"))
         self.agent_recursion_limit = int(os.getenv("AGENT_RECURSION_LIMIT", "50"))

@@ -338,9 +338,8 @@ customer-data/langgraph_api/
    - Reflection
    - ModelRetry
    - ToolRetry
-   - Shell
    - HITL via `create_deep_agent(interrupt_on=...)` when enabled
-6. 使用 `create_deep_agent(...)` 创建最终 agent。
+6. 按配置使用 `FilesystemBackend` 或提供 `execute` 的 `LocalShellBackend`，并通过 `create_deep_agent(...)` 创建最终 agent。
 
 LLM、MCP session 和工具会在 Agent Server 进程内缓存，避免每个请求重复初始化。首次加载可能较慢，后续调用应复用缓存。
 
@@ -352,7 +351,7 @@ LLM、MCP session 和工具会在 Agent Server 进程内缓存，避免每个请
 AGENT_TOOL_APPROVAL_ENABLED=true
 ```
 
-则高风险工具会通过 DeepAgents `create_deep_agent(interrupt_on=...)` 进入官方 HITL 流程。当前审批覆盖的工具由 `agent_runtime/middleware.py` 统一生成 `interrupt_on` 配置，包含文件写入和 shell 等操作。
+则高风险工具会通过 DeepAgents `create_deep_agent(interrupt_on=...)` 进入官方 HITL 流程。当前审批覆盖的工具由 `agent_runtime/middleware.py` 统一生成 `interrupt_on` 配置，包含文件写入和 `execute` 命令执行等操作。
 
 交互式 CLI 会提示人工决策；非交互场景可以使用：
 
