@@ -22,6 +22,7 @@ from langchain.agents.middleware import (
     ModelRetryMiddleware,
     ToolRetryMiddleware,
 )
+from langchain_core.globals import set_debug
 
 from config import config
 from agent_runtime.reflection import ReflectionMiddleware
@@ -37,6 +38,7 @@ from workspace.path_resolver import (
 )
 
 logger = logging.getLogger(__name__)
+set_debug(True)
 _FILESYSTEM_ROOT_PATH: Path | None = None
 _DISABLED_GENERAL_PURPOSE_PROFILE_KEYS: set[str] = set()
 
@@ -361,6 +363,16 @@ def create_lint_deep_agent(
         log_prefix,
         root_path,
     )
-    task_tool_available = config.agent_enable_subagents or not default_general_purpose_disabled
-    runtime_tools = ["task", *runtime_tool_names] if task_tool_available else runtime_tool_names
+    runtime_tools = [
+        "write_todos",
+        "ls",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "grep",
+        *runtime_tool_names,
+    ]
+    if config.agent_enable_subagents or not default_general_purpose_disabled:
+        runtime_tools.append("task")
     return agent, guarded_tools, list(dict.fromkeys(runtime_tools))

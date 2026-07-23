@@ -101,6 +101,7 @@ async def lint_agent_graph(runtime: ServerRuntime | None = None) -> AsyncIterato
                 log_prefix="[agent_runtime]",
             )
             base_tools = loaded_tools.tools
+            tool_names = loaded_tools.tool_names
         else:
             base_tools = []
 
@@ -115,7 +116,7 @@ async def lint_agent_graph(runtime: ServerRuntime | None = None) -> AsyncIterato
         )
         tools = [*base_tools, root_cause_tool]
 
-        agent, _, _ = create_lint_deep_agent(
+        agent, _, runtime_tool_names = create_lint_deep_agent(
             llm,
             tools,
             root_dir=REPO_ROOT,
@@ -125,6 +126,13 @@ async def lint_agent_graph(runtime: ServerRuntime | None = None) -> AsyncIterato
             context_schema=AgentContext,
             tool_retry_tools=base_tools,
         )
+        if is_execution:
+            tool_names = list(
+                dict.fromkeys(
+                    [*tool_names, root_cause_tool.name, *runtime_tool_names]
+                )
+            )
+            logger.info("[agent_runtime] Available agent tools: %s", tool_names)
 
         yield agent
 

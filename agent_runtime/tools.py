@@ -23,7 +23,6 @@ from memory.long_term import build_memory_tools
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-FILESYSTEM_TOOL_NAMES = ("ls", "read_file", "write_file", "edit_file", "glob", "grep")
 
 
 @dataclass
@@ -72,8 +71,7 @@ async def load_agent_tools(
         fetch_url_tool,
         *build_memory_tools(),
     ]
-    tool_names = list(dict.fromkeys([*(getattr(tool, "name", str(tool)) for tool in tools), *FILESYSTEM_TOOL_NAMES]))
-    logger.info("%s Loaded tools: %s", log_prefix, tool_names)
+    tool_names = list(dict.fromkeys(getattr(tool, "name", str(tool)) for tool in tools))
     return LoadedAgentTools(
         tools=tools,
         tool_names=tool_names,

@@ -146,6 +146,7 @@ async def _run_chat_runtime_owner(
             tool_retry_tools=base_tools,
         )
         tool_names = list(dict.fromkeys([*tool_names, *runtime_tool_names]))
+        logger.info("[chat_app] Available agent tools: %s", tool_names)
         if approval_guarded_tools:
             logger.info("[chat_app] Tool approval enabled for: %s", approval_guarded_tools)
 
