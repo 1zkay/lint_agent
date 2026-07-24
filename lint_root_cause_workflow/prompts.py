@@ -41,6 +41,8 @@ root-cause conclusions to the exact output target supplied by the workflow.
 def build_classifier_prompt(
     *,
     rtl_dir: str,
+    filelist_path: str,
+    hierarchy_available: bool,
     hierarchy_tree_path: str,
     design_metadata_path: str,
     previous_error: str,
@@ -50,23 +52,38 @@ def build_classifier_prompt(
         if previous_error
         else ""
     )
+    if hierarchy_available:
+        structure_input = f"""
+- hierarchy tree: {hierarchy_tree_path}
+
+Classify every module present in the active hierarchy. Do not classify modules
+absent from it. Structural depth is evidence, not the semantic decision rule.
+The level4 module must be the elaborated top module.
+""".strip()
+    else:
+        structure_input = """
+Hierarchy elaboration is unavailable. Read the filelist, module inventory, and
+RTL sources directly; classify every inventoried source module and infer exactly
+one design top for level4. Do not invent modules or instance paths.
+""".strip()
     return f"""
-Classify every active module exactly once into these four semantic levels:
+Classify every selected module exactly once into these four semantic levels:
 
 - level1: reusable primitive or common support units, such as synchronizers,
   reset cells, gates, arbiters, encoders, or generic storage cells;
 - level2: independently understandable modules implementing one clear function;
 - level3: non-top composite, coordinating, or subsystem modules;
-- level4: exactly the elaborated top module.
+- level4: exactly one design top module.
 
 Read:
 - RTL directory: {rtl_dir}
-- hierarchy tree: {hierarchy_tree_path}
+- filelist: {filelist_path}
 - design metadata: {design_metadata_path}
 
-Do not classify modules absent from the active hierarchy. Structural depth is
-evidence, not the semantic decision rule. Return only one JSON object without
-commentary or Markdown. Follow this format exactly:
+{structure_input}
+
+Return only one JSON object without commentary or Markdown. Follow this format
+exactly:
 
 {SLICE_POLICY_PARSER.get_format_instructions()}
 {retry_context}

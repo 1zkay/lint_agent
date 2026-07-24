@@ -13,10 +13,13 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from _contract import (
     FALSE_POSITIVE_ROOT_ID,
+    IN_HIERARCHY_STATUS,
     MAPPED_LINT_COLUMNS,
+    MODULE_SCOPE_STATUS,
     ROOT_CAUSE_COLUMNS,
     ROOT_ID_RE,
     SLICE_SCOPES,
+    STANDALONE_STATUS,
     VIOLATION_ID_RE,
     format_root_id,
 )
@@ -30,6 +33,23 @@ CJK_RE = re.compile(r"[\u3400-\u9fff]")
 def _load_slice_lint(
     slices_dir: Path,
 ) -> tuple[dict[str, tuple[str, str]], dict[str, int]]:
+    coverage_path = slices_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+    if not isinstance(coverage, dict):
+        raise ValueError(f"{coverage_path}: invalid coverage contract")
+    hierarchy_available = coverage.get("hierarchy_available")
+    if (
+        coverage.get("schema_version") != 1
+        or not isinstance(hierarchy_available, bool)
+    ):
+        raise ValueError(f"{coverage_path}: invalid coverage contract")
+
+    tree_path = slices_dir / "hierarchy_tree.txt"
+    if hierarchy_available and not tree_path.is_file():
+        raise ValueError(f"hierarchy tree is missing: {tree_path}")
+    if not hierarchy_available and tree_path.exists():
+        raise ValueError(f"module-only slices contain a hierarchy tree: {tree_path}")
+
     lint_rows_by_id: dict[str, tuple[str, str]] = {}
     for scope in SLICE_SCOPES:
         lint_csv = slices_dir / scope / "lint.csv"
@@ -38,6 +58,24 @@ def _load_slice_lint(
             if reader.fieldnames != MAPPED_LINT_COLUMNS:
                 raise ValueError(f"{lint_csv}: unexpected lint CSV header")
             for csv_line, row in enumerate(reader, start=2):
+                status = str(row.get("status", ""))
+                hierarchy = str(row.get("hierarchy", "")).strip()
+                if hierarchy_available:
+                    expected_status = (
+                        STANDALONE_STATUS
+                        if scope == "isolated"
+                        else IN_HIERARCHY_STATUS
+                    )
+                    if status != expected_status or (
+                        scope == "isolated" and hierarchy
+                    ):
+                        raise ValueError(
+                            f"{lint_csv}:{csv_line}: invalid hierarchy mapping"
+                        )
+                elif status != MODULE_SCOPE_STATUS or hierarchy or scope == "isolated":
+                    raise ValueError(
+                        f"{lint_csv}:{csv_line}: invalid module-only mapping"
+                    )
                 violation_id = str(row.get("vio_id", "")).strip()
                 if not VIOLATION_ID_RE.match(violation_id):
                     raise ValueError(f"{lint_csv}:{csv_line}: invalid vio_id")
@@ -47,8 +85,10 @@ def _load_slice_lint(
                 contents = str(row.get("contents", ""))
                 lint_rows_by_id[violation_id] = (message_id, contents)
 
-    coverage = json.loads((slices_dir / "coverage.json").read_text(encoding="utf-8"))
-    expected = coverage.get("lint_entries", {}).get("owned_count")
+    lint_coverage = coverage.get("lint_entries")
+    if not isinstance(lint_coverage, dict):
+        raise ValueError(f"{coverage_path}: invalid lint coverage")
+    expected = lint_coverage.get("owned_count")
     if expected != len(lint_rows_by_id):
         raise ValueError(
             f"slices coverage expects {expected} lint rows, found {len(lint_rows_by_id)}"

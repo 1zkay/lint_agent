@@ -84,6 +84,26 @@ def _stdout_value(result: ScriptResult, key: str) -> str:
     )
 
 
+def _hierarchy_available(path: Path) -> bool:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"invalid hierarchy status: {path}")
+    mode = data.get("mode")
+    expected_keys = (
+        {"schema_version", "mode"}
+        if mode == "hierarchy"
+        else {"schema_version", "mode", "reason"}
+    )
+    if (
+        data.get("schema_version") != 1
+        or mode not in {"hierarchy", "module"}
+        or set(data) != expected_keys
+        or (mode == "module" and not str(data.get("reason", "")).strip())
+    ):
+        raise ValueError(f"invalid hierarchy status: {path}")
+    return mode == "hierarchy"
+
+
 def _agent_context(runtime: Runtime[AgentContext]) -> AgentContext:
     return runtime.context or AgentContext()
 
@@ -145,7 +165,7 @@ class WorkflowNodes:
         report_path_text = _stdout_value(result, "REPORT_PATH")
         if not project_name or not run_dir_text or not report_path_text:
             raise RuntimeError(
-                "input preparation did not return PROJECT_NAME, RUN_DIR, and REPORT_PATH"
+                "input preparation returned an incomplete output contract"
             )
 
         reports_dir = (REPO_ROOT / "reports").resolve()
@@ -163,9 +183,17 @@ class WorkflowNodes:
         rtl_dir = _required_path(run_dir / "rtl", directory=True)
         filelist_path = _required_path(run_dir / "filelist.f", directory=False)
         work_dir = _required_path(run_dir / "work", directory=True)
-        hierarchy_tree_path = _required_path(
-            work_dir / "hierarchy_tree.txt", directory=False
+        hierarchy_status_path = _required_path(
+            work_dir / "hierarchy_status.json", directory=False
         )
+        hierarchy_available = _hierarchy_available(hierarchy_status_path)
+        hierarchy_tree_path = work_dir / "hierarchy_tree.txt"
+        if hierarchy_available:
+            _required_path(hierarchy_tree_path, directory=False)
+        elif hierarchy_tree_path.exists():
+            raise RuntimeError(
+                "module-only preparation unexpectedly produced a hierarchy tree"
+            )
         _required_path(work_dir / "lint_entries_mapped.csv", directory=False)
         design_metadata_path = _required_path(
             work_dir / "design_metadata.json", directory=False
@@ -174,7 +202,7 @@ class WorkflowNodes:
             "run_dir": str(run_dir),
             "rtl_dir": str(rtl_dir),
             "filelist_path": str(filelist_path),
-            "hierarchy_tree_path": str(hierarchy_tree_path),
+            "hierarchy_status_path": str(hierarchy_status_path),
             "design_metadata_path": str(design_metadata_path),
             "policy_path": str(work_dir / "slice_policy.json"),
             "slices_dir": "",
@@ -191,9 +219,15 @@ class WorkflowNodes:
         config: RunnableConfig,
         runtime: Runtime[AgentContext],
     ) -> dict[str, Any]:
+        hierarchy_status_path = Path(state["hierarchy_status_path"])
+        hierarchy_available = _hierarchy_available(hierarchy_status_path)
         prompt = build_classifier_prompt(
             rtl_dir=state["rtl_dir"],
-            hierarchy_tree_path=state["hierarchy_tree_path"],
+            filelist_path=state["filelist_path"],
+            hierarchy_available=hierarchy_available,
+            hierarchy_tree_path=str(
+                hierarchy_status_path.parent / "hierarchy_tree.txt"
+            ),
             design_metadata_path=state["design_metadata_path"],
             previous_error=state.get("slice_error", ""),
         )
@@ -216,15 +250,17 @@ class WorkflowNodes:
         )
         os.replace(temporary_path, policy_path)
 
-        build_result = await _run_script(
-            BUILD_SLICES_SCRIPT,
+        build_arguments = [
             "--project-dir",
             state["run_dir"],
-            "--tree-dir",
-            str(Path(state["hierarchy_tree_path"]).parent),
+            "--work-dir",
+            str(Path(state["design_metadata_path"]).parent),
             "--policy",
             state["policy_path"],
-        )
+        ]
+        if not hierarchy_available:
+            build_arguments.append("--module-only")
+        build_result = await _run_script(BUILD_SLICES_SCRIPT, *build_arguments)
         if build_result.returncode == 2:
             return self._slice_failure(_script_error(build_result))
         if build_result.returncode:

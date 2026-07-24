@@ -25,7 +25,7 @@ class WorkflowState(WorkflowInput, total=False):
     run_dir: str
     rtl_dir: str
     filelist_path: str
-    hierarchy_tree_path: str
+    hierarchy_status_path: str
     design_metadata_path: str
     policy_path: str
     slices_dir: str

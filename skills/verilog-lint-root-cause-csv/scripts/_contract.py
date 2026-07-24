@@ -47,6 +47,10 @@ ROOT_CAUSE_COLUMNS = [
 LEVEL_SCOPES = ("level1", "level2", "level3", "level4")
 SLICE_SCOPES = (*LEVEL_SCOPES, "isolated")
 
+IN_HIERARCHY_STATUS = "in_hierarchy_tree"
+STANDALONE_STATUS = "standalone_module_not_in_tree"
+MODULE_SCOPE_STATUS = "module_scope"
+
 ROOT_ID_RE = re.compile(r"^root_(\d{3,})$")
 VIOLATION_ID_RE = re.compile(r"^vio_(\d{3,})$")
 FALSE_POSITIVE_ROOT_ID = "误报"

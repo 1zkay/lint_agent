@@ -32,19 +32,22 @@ level1 -> level2 -> level3 -> level4 -> isolated
 
 For each scope:
 
-- use `context.json` for module source paths, parameters, ports, and child
-  instances;
+- use `context.json` for module source paths and available structural metadata;
 - use `lint.csv` for exclusively owned alerts;
 - use the project `filelist.f` for compile order and macros;
-- use `slices/hierarchy_tree.txt` for active instance context;
+- when `coverage.json` reports `hierarchy_available=true`, use
+  `slices/hierarchy_tree.txt` for active instance context; otherwise analyze
+  directly from the module sources without inferring instance paths;
 - for every lint row, open `rtl/<source_file>` at `source_line` and inspect the
   relevant enclosing construct before assigning its root cause, grouping, fix,
   or false-positive status;
 - never make any decision from `message_id` or `contents` alone; if the
   corresponding source and relevant context have not been inspected, do not
   finalize that row;
-- treat a semicolon-separated `hierarchy` field as equivalent instances of one
-  source warning, not as multiple leaf violations;
+- treat a nonempty `hierarchy` field as report-backed, tree-validated instance
+  context; treat an empty field as a module-scope finding, and keep
+  semicolon-separated paths as one source warning rather than multiple leaf
+  violations;
 - analyze isolated rows against their source and child instances; absence from
   the active hierarchy alone does not prove a false positive.
 

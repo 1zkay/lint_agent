@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Map lint CSV entries and RTL metadata onto a Yosys-elaborated hierarchy."""
+"""Map lint CSV entries onto an elaborated hierarchy or source modules."""
 
 from __future__ import annotations
 
@@ -12,12 +12,18 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from _contract import MAPPED_LINT_COLUMNS, format_violation_id
+from _contract import (
+    IN_HIERARCHY_STATUS,
+    MAPPED_LINT_COLUMNS,
+    MODULE_SCOPE_STATUS,
+    STANDALONE_STATUS,
+    format_violation_id,
+)
 from _filelist import SOURCE_SUFFIXES, choose_filelist, parse_filelist, unique_paths
 
 LINT_AGENT_ROOT = Path(__file__).resolve().parents[3]
@@ -36,9 +42,11 @@ EMBEDDED_POSITION_RE = re.compile(
     r"\((?P<line>\d+)\)\s*$",
     re.IGNORECASE,
 )
+REPORTED_HIERARCHY_RE = re.compile(r"\bhierarchy\s+'([^']+)'", re.IGNORECASE)
 SRC_LINE_RE = re.compile(r":(?P<line>\d+)\.")
-MODULE_RE = re.compile(r"\s*module\s+([A-Za-z_][A-Za-z0-9_$]*)\b")
-ENDMODULE_RE = re.compile(r"\s*endmodule\b")
+VERILOG_TOKEN_RE = re.compile(r"\\[^\s]+|[A-Za-z_][A-Za-z0-9_$]*")
+MODULE_KEYWORDS = {"module", "macromodule"}
+MODULE_LIFETIMES = {"automatic", "static"}
 NORMALIZED_LINT_INPUT_COLUMNS = (
     "violation_id",
     "severity",
@@ -86,7 +94,7 @@ class MappedLint:
     source_file: str
     source_line: int
     source_module: str
-    instance_paths: list[str]
+    hierarchy_paths: list[str]
     status: str
     contents: str
 
@@ -94,8 +102,8 @@ class MappedLint:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Build a Yosys hierarchy tree from a staged Verilog project and map "
-            "lint CSV file(line) reports onto instance paths."
+            "Map lint CSV file(line) reports onto a Yosys hierarchy, with "
+            "source-module fallback when hierarchy generation fails."
         )
     )
     parser.add_argument("--csv", type=Path, required=True, help="Lint report CSV path.")
@@ -393,27 +401,11 @@ def build_hierarchy(
     return root, dict(module_to_paths)
 
 
-def render_tree(root: CellNode, direct_counts: Counter[str] | None = None) -> str:
-    direct_counts = direct_counts or Counter()
-    subtree_counts: Counter[str] = Counter()
-
-    def fill_counts(node: CellNode) -> int:
-        total = direct_counts[node.display_path]
-        for child in node.children:
-            total += fill_counts(child)
-        subtree_counts[node.display_path] = total
-        return total
-
-    fill_counts(root)
-
+def render_tree(root: CellNode) -> str:
     lines: list[str] = []
 
     def label(node: CellNode) -> str:
-        count_text = (
-            f" [lint={direct_counts[node.display_path]}, "
-            f"subtree={subtree_counts[node.display_path]}]"
-        )
-        return f"{node.path[-1]} : {node.display_type}{count_text}"
+        return f"{node.path[-1]} : {node.display_type}"
 
     lines.append(label(root))
 
@@ -434,34 +426,139 @@ def parse_module_ranges(
 ) -> list[ModuleRange]:
     ranges: list[ModuleRange] = []
     for file_path in files:
+        analysis_file = (
+            file_path.resolve().relative_to(rtl_root.resolve()).as_posix()
+        )
+        in_block_comment = False
+        in_string = False
         current: str | None = None
         start = 0
-        lines = file_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        module_start = 0
+        expect_module_name = False
+        lines = file_path.read_text(
+            encoding="utf-8-sig",
+            errors="replace",
+        ).splitlines()
         for line_no, line in enumerate(lines, 1):
-            if current is None:
-                match = MODULE_RE.match(line)
-                if match:
-                    current = match.group(1)
-                    start = line_no
-            elif ENDMODULE_RE.match(line):
-                analysis_file = (
-                    file_path.resolve().relative_to(rtl_root.resolve()).as_posix()
-                )
-                ranges.append(
-                    ModuleRange(
-                        module=current,
-                        file=file_path,
-                        analysis_file=analysis_file,
-                        start=start,
-                        end=line_no,
+            code: list[str] = []
+            index = 0
+            while index < len(line):
+                if in_block_comment:
+                    end = line.find("*/", index)
+                    if end < 0:
+                        index = len(line)
+                        continue
+                    in_block_comment = False
+                    code.append(" ")
+                    index = end + 2
+                    continue
+                if in_string:
+                    if line[index] == "\\":
+                        index += 2
+                    elif line[index] == '"':
+                        in_string = False
+                        index += 1
+                    else:
+                        index += 1
+                    continue
+                if line.startswith("//", index):
+                    break
+                if line.startswith("/*", index):
+                    in_block_comment = True
+                    code.append(" ")
+                    index += 2
+                    continue
+                if line[index] == '"':
+                    in_string = True
+                    code.append(" ")
+                    index += 1
+                    continue
+                if line[index] == "\\":
+                    end = index + 1
+                    while end < len(line) and not line[end].isspace():
+                        end += 1
+                    code.append(line[index:end])
+                    index = end
+                    continue
+                code.append(line[index])
+                index += 1
+            for match in VERILOG_TOKEN_RE.finditer("".join(code)):
+                token = match.group(0)
+                if current is None:
+                    if expect_module_name:
+                        if token in MODULE_LIFETIMES:
+                            continue
+                        current = token
+                        start = module_start
+                        expect_module_name = False
+                    elif token in MODULE_KEYWORDS:
+                        module_start = line_no
+                        expect_module_name = True
+                elif token == "endmodule":
+                    ranges.append(
+                        ModuleRange(
+                            module=current,
+                            file=file_path,
+                            analysis_file=analysis_file,
+                            start=start,
+                            end=line_no,
+                        )
                     )
-                )
-                current = None
+                    current = None
     return ranges
 
 
 def normalize_lint_file(path_text: str) -> str:
     return posixpath.normpath(path_text.replace("\\", "/"))
+
+
+def normalize_reported_hierarchy(value: str) -> str:
+    value = value.strip().strip("/")
+    if not value:
+        return ""
+    separator = ":" if ":" in value and "@" in value else "/"
+    instances = [
+        token.split("@", 1)[0].strip().strip("/")
+        for token in value.replace("\\", "/").split(separator)
+    ]
+    return ".".join(instance for instance in instances if instance)
+
+
+def contains_hierarchy_path(contents: str, path: str) -> bool:
+    needle = path.replace(".", "/")
+    start = 0
+    while True:
+        index = contents.find(needle, start)
+        if index < 0:
+            return False
+        before = contents[index - 1] if index else ""
+        end = index + len(needle)
+        after = contents[end] if end < len(contents) else ""
+        if (
+            (not before or not (before.isalnum() or before in "_$/"))
+            and (not after or after in "/[ .'\"),;:@")
+        ):
+            return True
+        start = index + 1
+
+
+def reported_hierarchy_paths(contents: str, candidates: list[str]) -> list[str]:
+    resolved: list[str] = []
+    for value in REPORTED_HIERARCHY_RE.findall(contents):
+        reported = normalize_reported_hierarchy(value)
+        matches = [
+            path
+            for path in candidates
+            if path == reported or path.endswith(f".{reported}")
+        ]
+        if len(matches) == 1:
+            resolved.extend(matches)
+
+    if not resolved:
+        resolved.extend(
+            path for path in candidates if contains_hierarchy_path(contents, path)
+        )
+    return list(dict.fromkeys(resolved))
 
 
 def locate_module_for_line(
@@ -506,7 +603,7 @@ def locate_module_for_line(
 def parse_lint_csv(
     csv_path: Path,
     ranges: list[ModuleRange],
-    module_to_paths: dict[str, list[str]],
+    module_to_paths: dict[str, list[str]] | None,
 ) -> list[MappedLint]:
     mapped: list[MappedLint] = []
 
@@ -566,8 +663,17 @@ def parse_lint_csv(
             source_file = located.analysis_file
             source_module = located.module
 
-            instance_paths = list(module_to_paths.get(source_module, []))
-            status = "in_hierarchy_tree" if instance_paths else "standalone_module_not_in_tree"
+            if module_to_paths is None:
+                hierarchy_paths = []
+                status = MODULE_SCOPE_STATUS
+            else:
+                candidate_paths = module_to_paths.get(source_module, [])
+                status = (
+                    IN_HIERARCHY_STATUS
+                    if candidate_paths
+                    else STANDALONE_STATUS
+                )
+                hierarchy_paths = reported_hierarchy_paths(contents, candidate_paths)
 
             mapped.append(
                 MappedLint(
@@ -577,12 +683,37 @@ def parse_lint_csv(
                     source_file=source_file,
                     source_line=source_line,
                     source_module=source_module,
-                    instance_paths=instance_paths,
+                    hierarchy_paths=hierarchy_paths,
                     status=status,
                     contents=contents,
                 )
             )
     return mapped
+
+
+def source_files_by_module(ranges: list[ModuleRange]) -> dict[str, list[str]]:
+    source_by_module: dict[str, list[str]] = {}
+    for item in ranges:
+        source_file = item.analysis_file
+        files = source_by_module.setdefault(item.module, [])
+        if source_file not in files:
+            files.append(source_file)
+    return source_by_module
+
+
+def build_source_metadata(ranges: list[ModuleRange]) -> dict:
+    modules: dict[str, dict] = {}
+    for module, source_files in source_files_by_module(ranges).items():
+        metadata = {
+            "source_file": source_files[0],
+            "parameters": {},
+            "ports": [],
+            "child_instances": [],
+        }
+        if len(source_files) > 1:
+            metadata["source_files"] = source_files
+        modules[module] = metadata
+    return {"schema_version": 1, "modules": modules}
 
 
 def build_design_metadata(
@@ -596,12 +727,17 @@ def build_design_metadata(
         internal: module_display_name(internal, module, source_modules)
         for internal, module in yosys_modules.items()
     }
-    source_by_module: dict[str, str] = {}
-    for item in ranges:
-        source_file = item.analysis_file
-        previous = source_by_module.setdefault(item.module, source_file)
-        if previous != source_file:
-            raise ValueError(f"Module {item.module} is defined in multiple source files")
+    source_files = source_files_by_module(ranges)
+    duplicate_sources = {
+        module: files for module, files in source_files.items() if len(files) > 1
+    }
+    if duplicate_sources:
+        raise ValueError(
+            f"Modules are defined in multiple source files: {duplicate_sources}"
+        )
+    source_by_module = {
+        module: files[0] for module, files in source_files.items()
+    }
 
     modules: dict[str, dict] = {}
     for internal, module in yosys_modules.items():
@@ -632,20 +768,17 @@ def build_design_metadata(
 
 def write_outputs(
     out_dir: Path,
-    root: CellNode,
+    root: CellNode | None,
     mapped: list[MappedLint],
     design_metadata: dict,
+    hierarchy_error: str | None,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    direct_counts: Counter[str] = Counter()
-    for item in mapped:
-        if item.status == "in_hierarchy_tree":
-            for instance_path in item.instance_paths:
-                direct_counts[instance_path] += 1
-
-    tree_text = render_tree(root, direct_counts)
     tree_path = out_dir / "hierarchy_tree.txt"
-    tree_path.write_text(tree_text + "\n", encoding="utf-8")
+    if root is None:
+        tree_path.unlink(missing_ok=True)
+    else:
+        tree_path.write_text(render_tree(root) + "\n", encoding="utf-8")
 
     mapped_csv = out_dir / "lint_entries_mapped.csv"
     with mapped_csv.open("w", newline="", encoding="utf-8") as handle:
@@ -656,7 +789,7 @@ def write_outputs(
                 {
                     "vio_id": item.vio_id,
                     "status": item.status,
-                    "hierarchy": ";".join(item.instance_paths),
+                    "hierarchy": ";".join(item.hierarchy_paths),
                     "source_module": item.source_module,
                     "source_file": item.source_file,
                     "source_line": item.source_line,
@@ -672,7 +805,21 @@ def write_outputs(
         encoding="utf-8",
     )
 
-    print(f"HIERARCHY_TREE={tree_path}")
+    status = {
+        "schema_version": 1,
+        "mode": "hierarchy" if root is not None else "module",
+    }
+    if hierarchy_error:
+        status["reason"] = hierarchy_error[-4000:]
+    status_path = out_dir / "hierarchy_status.json"
+    status_path.write_text(
+        json.dumps(status, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    print(f"HIERARCHY_STATUS={status_path}")
+    if root is not None:
+        print(f"HIERARCHY_TREE={tree_path}")
     print(f"MAPPED_LINT_CSV={mapped_csv}")
     print(f"DESIGN_METADATA={metadata_path}")
 
@@ -702,24 +849,37 @@ def main() -> int:
 
         files, incdirs, defines, filelist_top = collect_verilog_inputs(source_root)
         copy_runtime_data_files(source_root, work_root)
-        yosys = find_yosys(
-            explicit_bin=str(args.yosys) if args.yosys else None,
-            start_points=[source_root],
-        )
-        hierarchy_json, all_modules_json = run_yosys(
-            yosys,
-            files,
-            incdirs,
-            defines,
-            args.top or filelist_top,
-            work_root,
-        )
         ranges = parse_module_ranges(files, source_root / "rtl")
         source_modules = {item.module for item in ranges}
-        root, module_to_paths = build_hierarchy(hierarchy_json, source_modules)
+        hierarchy_error: str | None = None
+        try:
+            yosys = find_yosys(
+                explicit_bin=str(args.yosys) if args.yosys else None,
+                start_points=[source_root],
+            )
+            hierarchy_json, all_modules_json = run_yosys(
+                yosys,
+                files,
+                incdirs,
+                defines,
+                args.top or filelist_top,
+                work_root,
+            )
+            root, module_to_paths = build_hierarchy(hierarchy_json, source_modules)
+        except (OSError, RuntimeError, json.JSONDecodeError, KeyError) as exc:
+            print(
+                f"warning: hierarchy generation failed; using source-module fallback: {exc}",
+                file=sys.stderr,
+            )
+            hierarchy_error = str(exc)
+            root = None
+            module_to_paths = None
+            metadata = build_source_metadata(ranges)
+        else:
+            metadata = build_design_metadata(all_modules_json, ranges)
+
         mapped = parse_lint_csv(csv_path, ranges, module_to_paths)
-        metadata = build_design_metadata(all_modules_json, ranges)
-        write_outputs(out_dir, root, mapped, metadata)
+        write_outputs(out_dir, root, mapped, metadata, hierarchy_error)
 
         if args.keep_work:
             print(f"  work_dir: {work_root}")

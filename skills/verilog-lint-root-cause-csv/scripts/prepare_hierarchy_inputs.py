@@ -346,6 +346,8 @@ def main() -> int:
         )
         if result.returncode:
             raise RuntimeError(f"hierarchy mapper failed:\n{result.stderr[-2000:]}")
+        if not (work_dir / "hierarchy_status.json").is_file():
+            raise RuntimeError("hierarchy mapper did not create hierarchy_status.json")
         shutil.rmtree(work_dir / "_work", ignore_errors=True)
         if extracted.exists():
             shutil.rmtree(extracted)
