@@ -233,11 +233,8 @@ def run_yosys(
         )
         path.write_text(script, encoding="utf-8")
 
-    def execute(path: Path, *, plugin: str | None = None) -> subprocess.CompletedProcess[str]:
-        command = [str(yosys.bin)]
-        if plugin:
-            command.extend(["-m", plugin])
-        command.extend(["-q", "-s", str(path)])
+    def execute(path: Path) -> subprocess.CompletedProcess[str]:
+        command = [str(yosys.bin), "-q", "-s", str(path)]
         return subprocess.run(
             command,
             cwd=build_dir,
@@ -282,7 +279,7 @@ def run_yosys(
             fallback_script_path,
             ["read_slang", "--keep-hierarchy", "-f", "../hierarchy.slang.f"],
         )
-        result = execute(fallback_script_path, plugin="slang")
+        result = execute(fallback_script_path)
 
     (work_root / "yosys.stdout.log").write_text(result.stdout, encoding="utf-8", errors="replace")
     (work_root / "yosys.stderr.log").write_text(result.stderr, encoding="utf-8", errors="replace")
