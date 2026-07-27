@@ -128,6 +128,9 @@ async def _run_chat_runtime_owner(
             base_tools,
             candidate_llm=candidate_llm,
             judge_llm=judge_llm,
+            work_unit_max_concurrency=(
+                runtime_cfg.lint_root_cause_work_unit_max_concurrency
+            ),
             ensemble_size=runtime_cfg.lint_root_cause_ensemble_size,
             root_dir=PROJECT_ROOT,
             log_prefix="[chat_app:lint_root_cause]",

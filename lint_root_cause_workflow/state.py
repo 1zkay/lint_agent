@@ -16,9 +16,14 @@ class WorkflowOutput(TypedDict):
     report_path: str
 
 
-class CandidateReport(TypedDict):
-    candidate_id: int
+class WorkUnitResult(TypedDict):
+    unit_id: str
     report_path: str
+
+
+class MergeCandidateResult(TypedDict):
+    candidate_id: int
+    map_path: str
 
 
 class WorkflowState(WorkflowInput, total=False):
@@ -29,28 +34,44 @@ class WorkflowState(WorkflowInput, total=False):
     design_metadata_path: str
     policy_path: str
     slices_dir: str
+    local_catalog_path: str
+    adjudicated_map_path: str
     draft_csv: str
     report_path: str
     slice_error: str
     validation_error: str
-    candidate_reports: Annotated[list[CandidateReport], operator.add]
+    work_unit_results: Annotated[list[WorkUnitResult], operator.add]
+    merge_candidate_results: Annotated[list[MergeCandidateResult], operator.add]
 
 
-class CandidateWorkflowInput(TypedDict):
-    candidate_id: int
-    candidate_draft_csv: str
-    rtl_dir: str
-    filelist_path: str
-    slices_dir: str
+class WorkUnitInput(TypedDict):
+    unit_id: str
+    work_unit_dir: str
 
 
-class CandidateWorkflowOutput(TypedDict):
-    candidate_reports: list[CandidateReport]
+class WorkUnitOutput(TypedDict):
+    work_unit_results: list[WorkUnitResult]
 
 
-class CandidateWorkflowState(CandidateWorkflowInput, total=False):
+class WorkUnitState(WorkUnitInput, total=False):
     validation_error: str
-    candidate_reports: list[CandidateReport]
+    work_unit_results: list[WorkUnitResult]
+
+
+class MergeCandidateInput(TypedDict):
+    candidate_id: int
+    map_path: str
+    slices_dir: str
+    local_catalog_path: str
+
+
+class MergeCandidateOutput(TypedDict):
+    merge_candidate_results: list[MergeCandidateResult]
+
+
+class MergeCandidateState(MergeCandidateInput, total=False):
+    validation_error: str
+    merge_candidate_results: list[MergeCandidateResult]
 
 
 class SlicePolicy(BaseModel):

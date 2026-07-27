@@ -15,26 +15,32 @@ You are a senior Verilog/SystemVerilog design-structure analyst. Perform only
 semantic module classification for the prepared design paths supplied by the
 workflow. Use all available filesystem and analysis tools when useful, but do
 not preprocess inputs, build slices, analyze lint root causes, or modify files.
-Return the complete JSON object directly as the final response, without
-commentary or Markdown.
 """.strip()
 
 
-ROOT_CAUSE_CANDIDATE_SYSTEM_PROMPT = """
-You are a senior Verilog/SystemVerilog lint root-cause analyst. Follow the
-bundled verilog-lint-root-cause-csv skill with the prepared paths and exact
-output target supplied by the workflow. Use all available tools when useful.
+ROOT_CAUSE_WORK_UNIT_SYSTEM_PROMPT = """
+You are a senior Verilog/SystemVerilog lint root-cause analyst. Analyze only the
+assigned physical work unit and follow the bundled
+verilog-lint-root-cause-csv skill. Use the copied source evidence inside that
+unit and write only its exact local report target.
+""".strip()
+
+
+ROOT_CAUSE_GLOBAL_MERGE_SYSTEM_PROMPT = """
+You are a senior Verilog/SystemVerilog lint root-cause analyst. Consolidate
+every item in the supplied local-root catalog into one global root mapping by
+following the bundled verilog-lint-root-cause-csv skill. Use the work-unit
+evidence when useful, do not inspect another mapping output, and write only the
+exact mapping target.
 """.strip()
 
 
 ROOT_CAUSE_JUDGE_SYSTEM_PROMPT = """
-Follow the bundled verilog-lint-root-cause-csv skill. Synthesize the candidate
-reports supplied by the workflow into the final root-cause CSV. Review every
-proposed root and every leaf row within it. For each leaf row, reopen its slice
-lint entry and corresponding RTL source before deciding its root assignment,
-root cause, repair, parent relationship, or false-positive status. Do not accept
-a conclusion only because the candidate reports agree. Write only the final
-root-cause conclusions to the exact output target supplied by the workflow.
+Follow the bundled verilog-lint-root-cause-csv skill. Compare the supplied
+global mapping proposals item by item and write one complete mapping. Review
+every local item and every proposed global root definition. When proposals
+differ or evidence is ambiguous, reopen the corresponding work-unit lint rows
+and RTL before deciding. Do not decide by majority agreement.
 """.strip()
 
 
@@ -75,6 +81,13 @@ Classify every selected module exactly once into these four semantic levels:
 - level3: non-top composite, coordinating, or subsystem modules;
 - level4: exactly one design top module.
 
+Resolve overlaps deterministically: the design top is always level4; among
+non-top modules, assign reusable primitive or common support units to level1,
+then assign modules that coordinate multiple child functions or form a
+subsystem boundary to level3, and assign all remaining single-function modules
+to level2. Base the decision on RTL responsibility and composition, not module
+name, hierarchy depth, or instance count alone.
+
 Read:
 - RTL directory: {rtl_dir}
 - filelist: {filelist_path}
@@ -90,11 +103,9 @@ exactly:
 """.strip()
 
 
-def build_root_cause_prompt(
+def build_work_unit_prompt(
     *,
-    rtl_dir: str,
-    slices_dir: str,
-    filelist_path: str,
+    work_unit_dir: str,
     draft_csv: str,
     previous_error: str,
 ) -> str:
@@ -105,49 +116,73 @@ draft file; do not create another report. Validator output:
 {previous_error}
 """.strip()
         if previous_error
-        else "Create the first draft at the exact output path below."
+        else "Create the first draft at the exact local report path above."
     )
     return f"""
-    Prepared inputs:
-    - RTL directory: {rtl_dir}
-    - slices directory: {slices_dir}
-    - filelist: {filelist_path}
+Assigned work unit: {work_unit_dir}
 
-    Draft output path: {draft_csv}
+Local report path: {draft_csv}
 
-    {revision}
-    """.strip()
+{revision}
+""".strip()
 
 
-def build_adjudication_prompt(
+def build_global_merge_prompt(
     *,
-    rtl_dir: str,
     slices_dir: str,
-    filelist_path: str,
-    candidate_reports: list[str],
-    draft_csv: str,
+    local_catalog_path: str,
+    map_path: str,
     previous_error: str,
 ) -> str:
     revision = (
         f"""
-The adjudicated draft failed deterministic validation. Reopen and revise the
-same draft file; do not create another report. Validator output:
+The mapping failed deterministic validation. Reopen and revise the same file.
+Validator output:
 {previous_error}
 """.strip()
         if previous_error
-        else "Create the adjudicated draft at the exact output path below."
+        else "Create the complete global mapping at the exact output path above."
     )
-    candidate_list = "\n".join(f"- {path}" for path in candidate_reports)
     return f"""
-    Prepared design evidence:
-    - RTL directory: {rtl_dir}
-    - slices directory: {slices_dir}
-    - filelist: {filelist_path}
+- slices directory: {slices_dir}
+- local-root catalog: {local_catalog_path}
+- mapping output path: {map_path}
 
-    Independently generated, deterministically validated candidate reports:
-    {candidate_list}
+Map every local_item_id exactly once. Use exactly these columns:
+local_item_id,global_root_id,root_note,fix_suggestion,parent_global_root_id
 
-    Adjudicated draft output path: {draft_csv}
+{revision}
+""".strip()
 
-    {revision}
-    """.strip()
+
+def build_adjudication_prompt(
+    *,
+    slices_dir: str,
+    local_catalog_path: str,
+    candidate_maps: list[str],
+    adjudicated_map_path: str,
+    previous_error: str,
+) -> str:
+    revision = (
+        f"""
+The mapping failed deterministic validation. Reopen and revise the same file.
+Validator output:
+{previous_error}
+""".strip()
+        if previous_error
+        else "Create the complete mapping at the exact output path above."
+    )
+    candidates = "\n".join(f"  - {path}" for path in candidate_maps)
+    return f"""
+- slices directory: {slices_dir}
+- local-root catalog: {local_catalog_path}
+- global mapping proposals:
+{candidates}
+- mapping output path: {adjudicated_map_path}
+
+Review every local_item_id row, synthesize disagreements from evidence, and
+use exactly these columns:
+local_item_id,global_root_id,root_note,fix_suggestion,parent_global_root_id
+
+{revision}
+""".strip()

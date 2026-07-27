@@ -13,8 +13,9 @@ from agent_runtime.middleware import create_lint_deep_agent
 from lint_root_cause_workflow import build_workflow
 from lint_root_cause_workflow.prompts import (
     CLASSIFIER_SYSTEM_PROMPT,
-    ROOT_CAUSE_CANDIDATE_SYSTEM_PROMPT,
+    ROOT_CAUSE_GLOBAL_MERGE_SYSTEM_PROMPT,
     ROOT_CAUSE_JUDGE_SYSTEM_PROMPT,
+    ROOT_CAUSE_WORK_UNIT_SYSTEM_PROMPT,
 )
 from memory.long_term import AgentContext
 
@@ -25,6 +26,7 @@ def build_root_cause_workflow(
     *,
     candidate_llm: Any,
     judge_llm: Any,
+    work_unit_max_concurrency: int,
     ensemble_size: int,
     root_dir: str | Path,
     log_prefix: str,
@@ -44,15 +46,27 @@ def build_root_cause_workflow(
         tool_retry_tools=base_tools,
         model_retry_on_failure="error",
     )
-    candidate_agent, _, _ = create_lint_deep_agent(
+    work_unit_agent, _, _ = create_lint_deep_agent(
+        llm,
+        base_tools,
+        root_dir=root_dir,
+        log_prefix=f"{log_prefix}:work_unit",
+        system_prompt=ROOT_CAUSE_WORK_UNIT_SYSTEM_PROMPT,
+        store=store,
+        context_schema=AgentContext,
+        name="lint_root_cause_work_unit",
+        tool_retry_tools=base_tools,
+        model_retry_on_failure="error",
+    )
+    merge_agent, _, _ = create_lint_deep_agent(
         candidate_llm,
         base_tools,
         root_dir=root_dir,
-        log_prefix=f"{log_prefix}:candidate",
-        system_prompt=ROOT_CAUSE_CANDIDATE_SYSTEM_PROMPT,
+        log_prefix=f"{log_prefix}:global_merge",
+        system_prompt=ROOT_CAUSE_GLOBAL_MERGE_SYSTEM_PROMPT,
         store=store,
         context_schema=AgentContext,
-        name="lint_root_cause_candidate",
+        name="lint_root_cause_global_merge",
         tool_retry_tools=base_tools,
         model_retry_on_failure="error",
     )
@@ -70,8 +84,10 @@ def build_root_cause_workflow(
     )
     return build_workflow(
         classifier_agent=classifier_agent,
-        candidate_agent=candidate_agent,
+        work_unit_agent=work_unit_agent,
+        merge_agent=merge_agent,
         judge_agent=judge_agent,
+        work_unit_max_concurrency=work_unit_max_concurrency,
         ensemble_size=ensemble_size,
     )
 
@@ -82,6 +98,7 @@ def build_root_cause_workflow_tool(
     *,
     candidate_llm: Any,
     judge_llm: Any,
+    work_unit_max_concurrency: int,
     ensemble_size: int,
     root_dir: str | Path,
     log_prefix: str,
@@ -107,6 +124,7 @@ def build_root_cause_workflow_tool(
             base_tools,
             candidate_llm=candidate_llm,
             judge_llm=judge_llm,
+            work_unit_max_concurrency=work_unit_max_concurrency,
             ensemble_size=ensemble_size,
             root_dir=root_dir,
             log_prefix=log_prefix,

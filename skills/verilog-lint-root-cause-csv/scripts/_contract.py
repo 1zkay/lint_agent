@@ -44,8 +44,32 @@ ROOT_CAUSE_COLUMNS = [
     "leaf_violation_note",
 ]
 
+LOCAL_ROOT_CATALOG_COLUMNS = [
+    "local_item_id",
+    "unit_id",
+    "local_root_id",
+    "root_note",
+    "fix_suggestion",
+    "parent_local_item_id",
+    "leaf_count",
+]
+
+GLOBAL_ROOT_MAP_COLUMNS = [
+    "local_item_id",
+    "global_root_id",
+    "root_note",
+    "fix_suggestion",
+    "parent_global_root_id",
+]
+
 LEVEL_SCOPES = ("level1", "level2", "level3", "level4")
-SLICE_SCOPES = (*LEVEL_SCOPES, "isolated")
+ISOLATED_SCOPE = "isolated"
+WORK_UNIT_SCOPES = (*LEVEL_SCOPES, ISOLATED_SCOPE)
+MODULE_WORK_UNIT_KIND = "module"
+INSTANCE_WORK_UNIT_KIND = "instance"
+WORK_UNIT_KINDS = (MODULE_WORK_UNIT_KIND, INSTANCE_WORK_UNIT_KIND)
+WORK_UNIT_ID_DIGEST_LENGTH = 12
+SLICE_SCHEMA_VERSION = 2
 
 IN_HIERARCHY_STATUS = "in_hierarchy_tree"
 STANDALONE_STATUS = "standalone_module_not_in_tree"

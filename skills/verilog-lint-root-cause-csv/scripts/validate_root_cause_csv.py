@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import re
 import sys
 from collections import Counter, defaultdict
@@ -14,98 +13,123 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from _contract import (
     FALSE_POSITIVE_ROOT_ID,
     IN_HIERARCHY_STATUS,
+    INSTANCE_WORK_UNIT_KIND,
+    ISOLATED_SCOPE,
     MAPPED_LINT_COLUMNS,
+    MODULE_WORK_UNIT_KIND,
     MODULE_SCOPE_STATUS,
     ROOT_CAUSE_COLUMNS,
     ROOT_ID_RE,
-    SLICE_SCOPES,
     STANDALONE_STATUS,
     VIOLATION_ID_RE,
     format_root_id,
 )
 from _filelist import HEADER_SUFFIXES, SOURCE_SUFFIXES
+from _work_units import parse_work_unit_id, read_manifest
 
 INTEGER_RE = re.compile(r"^\d+$")
 WHITESPACE_RE = re.compile(r"\s")
 CJK_RE = re.compile(r"[\u3400-\u9fff]")
 
 
-def _load_slice_lint(
-    slices_dir: Path,
-) -> tuple[dict[str, tuple[str, str]], dict[str, int]]:
-    coverage_path = slices_dir / "coverage.json"
-    coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
-    if not isinstance(coverage, dict):
-        raise ValueError(f"{coverage_path}: invalid coverage contract")
-    hierarchy_available = coverage.get("hierarchy_available")
-    if (
-        coverage.get("schema_version") != 1
-        or not isinstance(hierarchy_available, bool)
-    ):
-        raise ValueError(f"{coverage_path}: invalid coverage contract")
-
-    tree_path = slices_dir / "hierarchy_tree.txt"
-    if hierarchy_available and not tree_path.is_file():
-        raise ValueError(f"hierarchy tree is missing: {tree_path}")
-    if not hierarchy_available and tree_path.exists():
-        raise ValueError(f"module-only slices contain a hierarchy tree: {tree_path}")
-
-    lint_rows_by_id: dict[str, tuple[str, str]] = {}
-    for scope in SLICE_SCOPES:
-        lint_csv = slices_dir / scope / "lint.csv"
-        with lint_csv.open(encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle)
-            if reader.fieldnames != MAPPED_LINT_COLUMNS:
-                raise ValueError(f"{lint_csv}: unexpected lint CSV header")
-            for csv_line, row in enumerate(reader, start=2):
-                status = str(row.get("status", ""))
-                hierarchy = str(row.get("hierarchy", "")).strip()
-                if hierarchy_available:
-                    expected_status = (
-                        STANDALONE_STATUS
-                        if scope == "isolated"
-                        else IN_HIERARCHY_STATUS
-                    )
-                    if status != expected_status or (
-                        scope == "isolated" and hierarchy
-                    ):
-                        raise ValueError(
-                            f"{lint_csv}:{csv_line}: invalid hierarchy mapping"
-                        )
-                elif status != MODULE_SCOPE_STATUS or hierarchy or scope == "isolated":
-                    raise ValueError(
-                        f"{lint_csv}:{csv_line}: invalid module-only mapping"
-                    )
-                violation_id = str(row.get("vio_id", "")).strip()
-                if not VIOLATION_ID_RE.match(violation_id):
-                    raise ValueError(f"{lint_csv}:{csv_line}: invalid vio_id")
-                if violation_id in lint_rows_by_id:
-                    raise ValueError(f"duplicate vio_id across slices: {violation_id}")
-                message_id = str(row.get("message_id", ""))
-                contents = str(row.get("contents", ""))
-                lint_rows_by_id[violation_id] = (message_id, contents)
-
-    lint_coverage = coverage.get("lint_entries")
-    if not isinstance(lint_coverage, dict):
-        raise ValueError(f"{coverage_path}: invalid lint coverage")
-    expected = lint_coverage.get("owned_count")
-    if expected != len(lint_rows_by_id):
-        raise ValueError(
-            f"slices coverage expects {expected} lint rows, found {len(lint_rows_by_id)}"
-        )
-    rtl_dir = slices_dir.parent / "rtl"
-    source_line_counts: dict[str, int] = {}
+def _source_line_counts(rtl_dir: Path) -> dict[str, int]:
+    counts: dict[str, int] = {}
     for path in rtl_dir.rglob("*"):
         if path.is_file() and path.suffix.lower() in {
             *SOURCE_SUFFIXES,
             *HEADER_SUFFIXES,
         }:
             with path.open(encoding="utf-8", errors="replace") as handle:
-                relative_path = path.relative_to(rtl_dir).as_posix()
-                source_line_counts[relative_path] = sum(1 for _ in handle)
-    if not source_line_counts:
+                counts[path.relative_to(rtl_dir).as_posix()] = sum(1 for _ in handle)
+    if not counts:
         raise ValueError(f"RTL source directory is empty or missing: {rtl_dir}")
-    return lint_rows_by_id, dict(source_line_counts)
+    return counts
+
+
+def _read_unit_lint(
+    unit_id: str,
+    unit_dir: Path,
+    hierarchy_available: bool,
+) -> dict[str, tuple[str, str]]:
+    scope, kind = parse_work_unit_id(unit_id)
+    tree_path = unit_dir / "hierarchy_tree.txt"
+    if kind == INSTANCE_WORK_UNIT_KIND and not tree_path.is_file():
+        raise ValueError(f"instance work unit has no hierarchy tree: {unit_dir}")
+    if kind == MODULE_WORK_UNIT_KIND and tree_path.exists():
+        raise ValueError(f"module work unit unexpectedly has a hierarchy tree: {unit_dir}")
+
+    result: dict[str, tuple[str, str]] = {}
+    lint_csv = unit_dir / "lint.csv"
+    with lint_csv.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != MAPPED_LINT_COLUMNS:
+            raise ValueError(f"{lint_csv}: unexpected lint CSV header")
+        for csv_line, row in enumerate(reader, start=2):
+            status = str(row.get("status", ""))
+            hierarchy = str(row.get("hierarchy", "")).strip()
+            if hierarchy_available:
+                expected_status = (
+                    STANDALONE_STATUS
+                    if scope == ISOLATED_SCOPE
+                    else IN_HIERARCHY_STATUS
+                )
+                if status != expected_status:
+                    raise ValueError(
+                        f"{lint_csv}:{csv_line}: invalid hierarchy status"
+                    )
+            elif (
+                scope == ISOLATED_SCOPE
+                or kind != MODULE_WORK_UNIT_KIND
+                or status != MODULE_SCOPE_STATUS
+            ):
+                raise ValueError(
+                    f"{lint_csv}:{csv_line}: invalid module-only mapping"
+                )
+            if (kind == MODULE_WORK_UNIT_KIND and hierarchy) or (
+                kind == INSTANCE_WORK_UNIT_KIND and not hierarchy
+            ):
+                raise ValueError(
+                    f"{lint_csv}:{csv_line}: hierarchy field conflicts with work-unit kind"
+                )
+            violation_id = str(row.get("vio_id", "")).strip()
+            if not VIOLATION_ID_RE.match(violation_id):
+                raise ValueError(f"{lint_csv}:{csv_line}: invalid vio_id")
+            if violation_id in result:
+                raise ValueError(f"{lint_csv}: duplicate vio_id {violation_id}")
+            result[violation_id] = (
+                str(row.get("message_id", "")),
+                str(row.get("contents", "")),
+            )
+    if not result:
+        raise ValueError(f"{lint_csv}: work unit contains no lint rows")
+    return result
+
+
+def _load_slice_lint(
+    slices_dir: Path,
+) -> tuple[dict[str, tuple[str, str]], dict[str, int]]:
+    manifest = read_manifest(slices_dir)
+    lint_rows_by_id: dict[str, tuple[str, str]] = {}
+    for unit_id, unit_dir in manifest.work_units:
+        for violation_id, lint_entry in _read_unit_lint(
+            unit_id, unit_dir, manifest.hierarchy_available
+        ).items():
+            if violation_id in lint_rows_by_id:
+                raise ValueError(f"duplicate vio_id across slices: {violation_id}")
+            lint_rows_by_id[violation_id] = lint_entry
+    return lint_rows_by_id, _source_line_counts(slices_dir.parent / "rtl")
+
+
+def _load_work_unit_lint(
+    unit_dir: Path,
+) -> tuple[dict[str, tuple[str, str]], dict[str, int]]:
+    slices_dir = unit_dir.parents[2]
+    manifest = read_manifest(slices_dir)
+    unit_id = unit_dir.relative_to(slices_dir).as_posix()
+    return (
+        _read_unit_lint(unit_id, unit_dir, manifest.hierarchy_available),
+        _source_line_counts(unit_dir / "rtl"),
+    )
 
 
 def _positive_int(value: str) -> int | None:
@@ -168,8 +192,18 @@ def _parent_cycle_errors(
     return errors
 
 
-def validate(output_csv: Path, slices_dir: Path) -> list[str]:
-    lint_rows_by_id, source_line_counts = _load_slice_lint(slices_dir)
+def validate(
+    output_csv: Path,
+    *,
+    slices_dir: Path | None = None,
+    work_unit_dir: Path | None = None,
+) -> list[str]:
+    if (slices_dir is None) == (work_unit_dir is None):
+        raise ValueError("select exactly one evidence scope")
+    if slices_dir is not None:
+        lint_rows_by_id, source_line_counts = _load_slice_lint(slices_dir)
+    else:
+        lint_rows_by_id, source_line_counts = _load_work_unit_lint(work_unit_dir)
     valid_ids = set(lint_rows_by_id)
     seen_leaf_ids: Counter[str] = Counter()
     id_locations: defaultdict[str, list[str]] = defaultdict(list)
@@ -366,13 +400,16 @@ def validate(output_csv: Path, slices_dir: Path) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("output_csv")
-    parser.add_argument("--slices-dir", required=True)
+    evidence = parser.add_mutually_exclusive_group(required=True)
+    evidence.add_argument("--slices-dir", type=Path)
+    evidence.add_argument("--work-unit-dir", type=Path)
     args = parser.parse_args()
 
     try:
         errors = validate(
             Path(args.output_csv),
-            Path(args.slices_dir),
+            slices_dir=args.slices_dir,
+            work_unit_dir=args.work_unit_dir,
         )
     except Exception as exc:
         print(f"ERROR: validator failed: {exc}", file=sys.stderr)

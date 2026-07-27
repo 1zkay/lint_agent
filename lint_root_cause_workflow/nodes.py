@@ -1,4 +1,4 @@
-"""Node implementations for the three-stage lint root-cause workflow."""
+"""Node implementations for the lint root-cause workflow."""
 
 from __future__ import annotations
 
@@ -22,17 +22,28 @@ from .prompts import (
     SLICE_POLICY_PARSER,
     build_adjudication_prompt,
     build_classifier_prompt,
-    build_root_cause_prompt,
+    build_global_merge_prompt,
+    build_work_unit_prompt,
 )
-from .state import CandidateWorkflowState, WorkflowState
+from .state import MergeCandidateState, WorkflowState, WorkUnitState
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_DIR = REPO_ROOT / "skills" / "verilog-lint-root-cause-csv"
-PREPARE_SCRIPT = SKILL_DIR / "scripts" / "prepare_hierarchy_inputs.py"
-BUILD_SLICES_SCRIPT = SKILL_DIR / "scripts" / "build_slices.py"
-SORT_SCRIPT = SKILL_DIR / "scripts" / "sort_root_cause_csv.py"
-VALIDATE_SCRIPT = SKILL_DIR / "scripts" / "validate_root_cause_csv.py"
+SCRIPT_DIR = SKILL_DIR / "scripts"
+PREPARE_SCRIPT = SCRIPT_DIR / "prepare_hierarchy_inputs.py"
+BUILD_SLICES_SCRIPT = SCRIPT_DIR / "build_slices.py"
+BUILD_CATALOG_SCRIPT = SCRIPT_DIR / "build_local_root_catalog.py"
+VALIDATE_MAP_SCRIPT = SCRIPT_DIR / "validate_global_root_map.py"
+EXPORT_SCRIPT = SCRIPT_DIR / "export_root_cause_csv.py"
+SORT_SCRIPT = SCRIPT_DIR / "sort_root_cause_csv.py"
+VALIDATE_REPORT_SCRIPT = SCRIPT_DIR / "validate_root_cause_csv.py"
+
+sys.path.insert(0, str(SCRIPT_DIR))
+try:
+    from _work_units import read_manifest
+finally:
+    sys.path.pop(0)
 
 
 @dataclass(frozen=True)
@@ -111,7 +122,6 @@ def _agent_context(runtime: Runtime[AgentContext]) -> AgentContext:
 def _cleanup_intermediate_run(run_dir: str) -> None:
     if app_config.lint_root_cause_keep_intermediates:
         return
-
     reports_dir = (REPO_ROOT / "reports").resolve()
     path = Path(run_dir).resolve()
     if path.parent != reports_dir:
@@ -128,12 +138,14 @@ class WorkflowNodes:
         self,
         *,
         classifier_agent: Any,
-        candidate_agent: Any,
+        work_unit_agent: Any,
+        merge_agent: Any,
         judge_agent: Any,
         ensemble_size: int,
     ) -> None:
         self.classifier_agent = classifier_agent
-        self.candidate_agent = candidate_agent
+        self.work_unit_agent = work_unit_agent
+        self.merge_agent = merge_agent
         self.judge_agent = judge_agent
         self.ensemble_size = ensemble_size
 
@@ -206,11 +218,14 @@ class WorkflowNodes:
             "design_metadata_path": str(design_metadata_path),
             "policy_path": str(work_dir / "slice_policy.json"),
             "slices_dir": "",
+            "local_catalog_path": "",
+            "adjudicated_map_path": "",
             "draft_csv": str(work_dir / "root_cause_draft.csv"),
             "report_path": str(report_path),
             "slice_error": "",
             "validation_error": "",
-            "candidate_reports": [],
+            "work_unit_results": [],
+            "merge_candidate_results": [],
         }
 
     async def classify_and_slice(
@@ -236,7 +251,6 @@ class WorkflowNodes:
             config=config,
             context=_agent_context(runtime),
         )
-
         try:
             policy = SLICE_POLICY_PARSER.invoke(result["messages"][-1])
         except (KeyError, IndexError, TypeError, OutputParserException) as exc:
@@ -269,7 +283,7 @@ class WorkflowNodes:
         slices_dir = _required_path(
             Path(state["run_dir"]) / "slices", directory=True
         )
-        _required_path(slices_dir / "coverage.json", directory=False)
+        read_manifest(slices_dir)
         return {
             "slice_error": "",
             "slices_dir": str(slices_dir),
@@ -281,59 +295,151 @@ class WorkflowNodes:
             "slices_dir": "",
         }
 
-    async def analyze_candidate(
+    async def analyze_work_unit(
         self,
-        state: CandidateWorkflowState,
+        state: WorkUnitState,
         config: RunnableConfig,
         runtime: Runtime[AgentContext],
     ) -> dict[str, Any]:
-        candidate_id = state["candidate_id"]
-        draft_csv = Path(state["candidate_draft_csv"])
-        draft_csv.parent.mkdir(parents=True, exist_ok=True)
+        unit_id = state["unit_id"]
+        unit_dir = Path(state["work_unit_dir"]).resolve()
+        slices_dir = unit_dir.parents[2]
+        expected = (slices_dir / unit_id).resolve()
+        if unit_dir != expected:
+            raise RuntimeError(f"work-unit path does not match unit_id: {unit_id}")
+        draft_csv = unit_dir / "local_root_cause.csv"
         previous_error = state.get("validation_error", "")
 
         if draft_csv.is_file() and not previous_error:
-            validation = await self._normalize_and_validate_report(
-                draft_csv, state["slices_dir"]
+            validation = await self._normalize_and_validate_local_report(
+                draft_csv, unit_dir
             )
             if validation.returncode == 0:
-                return self._candidate_success(candidate_id, draft_csv)
+                return self._work_unit_success(unit_id, draft_csv)
             if validation.returncode != 2:
                 raise RuntimeError(
-                    f"candidate validator failed: {_script_error(validation)}"
+                    f"local report validator failed: {_script_error(validation)}"
                 )
             previous_error = _script_error(validation)
 
-        prompt = build_root_cause_prompt(
-            rtl_dir=state["rtl_dir"],
-            slices_dir=state["slices_dir"],
-            filelist_path=state["filelist_path"],
+        prompt = build_work_unit_prompt(
+            work_unit_dir=str(unit_dir),
             draft_csv=str(draft_csv),
             previous_error=previous_error,
         )
-        await self.candidate_agent.ainvoke(
+        await self.work_unit_agent.ainvoke(
             {"messages": [{"role": "user", "content": prompt}]},
             config=config,
             context=_agent_context(runtime),
         )
-
         if not draft_csv.is_file():
-            return self._analysis_failure(
-                f"candidate {candidate_id} did not create its required draft: "
-                f"{draft_csv}"
-            )
+            return {"validation_error": f"work unit did not create {draft_csv}"}
 
-        validation = await self._normalize_and_validate_report(
-            draft_csv, state["slices_dir"]
+        validation = await self._normalize_and_validate_local_report(
+            draft_csv, unit_dir
         )
         if validation.returncode == 2:
-            return self._analysis_failure(_script_error(validation))
+            return {"validation_error": _script_error(validation)}
         if validation.returncode:
             raise RuntimeError(
-                f"candidate validator failed: {_script_error(validation)}"
+                f"local report validator failed: {_script_error(validation)}"
             )
+        return self._work_unit_success(unit_id, draft_csv)
 
-        return self._candidate_success(candidate_id, draft_csv)
+    async def build_local_root_catalog(
+        self, state: WorkflowState
+    ) -> dict[str, Any]:
+        expected = {
+            unit_id: unit_dir / "local_root_cause.csv"
+            for unit_id, unit_dir in read_manifest(
+                Path(state["slices_dir"])
+            ).work_units
+        }
+        actual: dict[str, Path] = {}
+        for result in state.get("work_unit_results", []):
+            unit_id = result["unit_id"]
+            report_path = Path(result["report_path"]).resolve()
+            previous = actual.setdefault(unit_id, report_path)
+            if previous != report_path:
+                raise RuntimeError(f"work unit {unit_id} returned conflicting paths")
+        if set(actual) != set(expected):
+            raise RuntimeError(
+                "work-unit result set is incomplete: "
+                f"expected {len(expected)}, got {len(actual)}"
+            )
+        for unit_id, expected_path in expected.items():
+            if actual[unit_id] != expected_path.resolve():
+                raise RuntimeError(f"work unit {unit_id} returned an invalid path")
+
+        catalog_path = Path(state["run_dir"]) / "work" / "local_root_catalog.csv"
+        result = await _run_script(
+            BUILD_CATALOG_SCRIPT,
+            "--slices-dir",
+            state["slices_dir"],
+            "--output",
+            str(catalog_path),
+        )
+        if result.returncode:
+            raise RuntimeError(f"local catalog failed: {_script_error(result)}")
+        _required_path(catalog_path, directory=False)
+        return {"local_catalog_path": str(catalog_path)}
+
+    async def analyze_merge_candidate(
+        self,
+        state: MergeCandidateState,
+        config: RunnableConfig,
+        runtime: Runtime[AgentContext],
+    ) -> dict[str, Any]:
+        candidate_id = state["candidate_id"]
+        map_path = Path(state["map_path"]).resolve()
+        run_dir = Path(state["slices_dir"]).resolve().parent
+        expected = (
+            run_dir
+            / "work"
+            / "ensemble"
+            / f"global_map_{candidate_id:03d}.csv"
+        ).resolve()
+        if map_path != expected:
+            raise RuntimeError(f"unexpected global map path: {map_path}")
+        map_path.parent.mkdir(parents=True, exist_ok=True)
+        previous_error = state.get("validation_error", "")
+
+        if map_path.is_file() and not previous_error:
+            validation = await self._validate_global_map(
+                map_path, state["local_catalog_path"]
+            )
+            if validation.returncode == 0:
+                return self._merge_candidate_success(candidate_id, map_path)
+            if validation.returncode != 2:
+                raise RuntimeError(
+                    f"global map validator failed: {_script_error(validation)}"
+                )
+            previous_error = _script_error(validation)
+
+        prompt = build_global_merge_prompt(
+            slices_dir=state["slices_dir"],
+            local_catalog_path=state["local_catalog_path"],
+            map_path=str(map_path),
+            previous_error=previous_error,
+        )
+        await self.merge_agent.ainvoke(
+            {"messages": [{"role": "user", "content": prompt}]},
+            config=config,
+            context=_agent_context(runtime),
+        )
+        if not map_path.is_file():
+            return {"validation_error": f"agent did not create {map_path}"}
+
+        validation = await self._validate_global_map(
+            map_path, state["local_catalog_path"]
+        )
+        if validation.returncode == 2:
+            return {"validation_error": _script_error(validation)}
+        if validation.returncode:
+            raise RuntimeError(
+                f"global map validator failed: {_script_error(validation)}"
+            )
+        return self._merge_candidate_success(candidate_id, map_path)
 
     async def adjudicate_root_causes(
         self,
@@ -341,99 +447,187 @@ class WorkflowNodes:
         config: RunnableConfig,
         runtime: Runtime[AgentContext],
     ) -> dict[str, Any]:
-        report_path = Path(state["report_path"])
-        draft_csv = Path(state["draft_csv"])
-
-        if report_path.is_file():
-            validation = await self._validate_report(report_path, state["slices_dir"])
+        map_path = (
+            Path(state["run_dir"]) / "work" / "adjudicated_global_map.csv"
+        ).resolve()
+        previous_error = state.get("validation_error", "")
+        if map_path.is_file() and not previous_error:
+            validation = await self._validate_global_map(
+                map_path, state["local_catalog_path"]
+            )
             if validation.returncode == 0:
-                report_path.chmod(0o644)
-                _cleanup_intermediate_run(state["run_dir"])
                 return {
                     "validation_error": "",
-                    "report_path": str(report_path),
+                    "adjudicated_map_path": str(map_path),
                 }
-            raise RuntimeError(
-                f"existing published report is invalid: {_script_error(validation)}"
-            )
+            if validation.returncode != 2:
+                raise RuntimeError(
+                    f"global map validator failed: {_script_error(validation)}"
+                )
+            previous_error = _script_error(validation)
 
         prompt = build_adjudication_prompt(
-            rtl_dir=state["rtl_dir"],
             slices_dir=state["slices_dir"],
-            filelist_path=state["filelist_path"],
-            candidate_reports=self._candidate_report_paths(state),
-            draft_csv=str(draft_csv),
-            previous_error=state.get("validation_error", ""),
+            local_catalog_path=state["local_catalog_path"],
+            candidate_maps=self._merge_candidate_paths(state),
+            adjudicated_map_path=str(map_path),
+            previous_error=previous_error,
         )
         await self.judge_agent.ainvoke(
             {"messages": [{"role": "user", "content": prompt}]},
             config=config,
             context=_agent_context(runtime),
         )
-
-        if not draft_csv.is_file():
-            return self._analysis_failure(
-                f"agent did not create the required draft: {draft_csv}"
-            )
-
-        validation = await self._normalize_and_validate_report(
-            draft_csv, state["slices_dir"]
+        if not map_path.is_file():
+            return {
+                "validation_error": f"agent did not create {map_path}",
+                "adjudicated_map_path": "",
+            }
+        validation = await self._validate_global_map(
+            map_path, state["local_catalog_path"]
         )
         if validation.returncode == 2:
-            return self._analysis_failure(_script_error(validation))
+            return {
+                "validation_error": _script_error(validation),
+                "adjudicated_map_path": "",
+            }
         if validation.returncode:
-            raise RuntimeError(f"report validator failed: {_script_error(validation)}")
+            raise RuntimeError(
+                f"global map validator failed: {_script_error(validation)}"
+            )
+        return {
+            "validation_error": "",
+            "adjudicated_map_path": str(map_path),
+        }
+
+    async def export_final_report(
+        self, state: WorkflowState
+    ) -> dict[str, Any]:
+        report_path = Path(state["report_path"])
+        if report_path.is_file():
+            validation = await self._validate_global_report(
+                report_path, state["slices_dir"]
+            )
+            if validation.returncode:
+                raise RuntimeError(
+                    f"existing published report is invalid: {_script_error(validation)}"
+                )
+            report_path.chmod(0o644)
+            _cleanup_intermediate_run(state["run_dir"])
+            return {"report_path": str(report_path)}
+
+        map_validation = await self._validate_global_map(
+            Path(state["adjudicated_map_path"]), state["local_catalog_path"]
+        )
+        if map_validation.returncode:
+            raise RuntimeError(
+                f"adjudicated map is invalid: {_script_error(map_validation)}"
+            )
+
+        draft_csv = Path(state["draft_csv"])
+        export = await _run_script(
+            EXPORT_SCRIPT,
+            "--slices-dir",
+            state["slices_dir"],
+            "--global-map",
+            state["adjudicated_map_path"],
+            "--output",
+            str(draft_csv),
+        )
+        if export.returncode:
+            raise RuntimeError(f"final CSV export failed: {_script_error(export)}")
+        validation = await self._normalize_and_validate_global_report(
+            draft_csv, state["slices_dir"]
+        )
+        if validation.returncode:
+            raise RuntimeError(
+                f"final report validation failed: {_script_error(validation)}"
+            )
 
         report_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(draft_csv, report_path)
         report_path.chmod(0o644)
         _cleanup_intermediate_run(state["run_dir"])
-        return {
-            "validation_error": "",
-            "report_path": str(report_path),
-        }
+        return {"report_path": str(report_path)}
 
-    def _candidate_report_paths(self, state: WorkflowState) -> list[str]:
-        reports_by_id: dict[int, str] = {}
-        for report in state.get("candidate_reports", []):
-            candidate_id = report["candidate_id"]
-            report_path = str(
-                _required_path(Path(report["report_path"]).resolve(), directory=False)
+    def _merge_candidate_paths(self, state: WorkflowState) -> list[str]:
+        paths: dict[int, str] = {}
+        for result in state.get("merge_candidate_results", []):
+            candidate_id = result["candidate_id"]
+            map_path = str(
+                _required_path(Path(result["map_path"]).resolve(), directory=False)
             )
-            existing = reports_by_id.setdefault(candidate_id, report_path)
-            if existing != report_path:
+            previous = paths.setdefault(candidate_id, map_path)
+            if previous != map_path:
                 raise RuntimeError(
-                    f"candidate {candidate_id} returned conflicting report paths"
+                    f"global map {candidate_id} returned conflicting paths"
                 )
-
         expected_ids = set(range(self.ensemble_size))
-        if set(reports_by_id) != expected_ids:
+        if set(paths) != expected_ids:
             raise RuntimeError(
-                "candidate report set is incomplete: "
-                f"expected {sorted(expected_ids)}, got {sorted(reports_by_id)}"
+                "global map set is incomplete: "
+                f"expected {sorted(expected_ids)}, got {sorted(paths)}"
             )
-        return [reports_by_id[candidate_id] for candidate_id in sorted(expected_ids)]
+        return [paths[candidate_id] for candidate_id in sorted(expected_ids)]
 
     @staticmethod
-    def _candidate_success(candidate_id: int, report_path: Path) -> dict[str, Any]:
+    def _work_unit_success(unit_id: str, report_path: Path) -> dict[str, Any]:
         return {
             "validation_error": "",
-            "candidate_reports": [
-                {"candidate_id": candidate_id, "report_path": str(report_path)}
+            "work_unit_results": [
+                {"unit_id": unit_id, "report_path": str(report_path)}
             ],
         }
 
-    async def _validate_report(
+    @staticmethod
+    def _merge_candidate_success(
+        candidate_id: int, map_path: Path
+    ) -> dict[str, Any]:
+        return {
+            "validation_error": "",
+            "merge_candidate_results": [
+                {"candidate_id": candidate_id, "map_path": str(map_path)}
+            ],
+        }
+
+    async def _validate_global_map(
+        self, map_path: Path, catalog_path: str
+    ) -> ScriptResult:
+        return await _run_script(
+            VALIDATE_MAP_SCRIPT,
+            str(map_path),
+            "--catalog",
+            catalog_path,
+        )
+
+    async def _validate_global_report(
         self, report_path: Path, slices_dir: str
     ) -> ScriptResult:
         return await _run_script(
-            VALIDATE_SCRIPT,
+            VALIDATE_REPORT_SCRIPT,
             str(report_path),
             "--slices-dir",
             slices_dir,
         )
 
-    async def _normalize_and_validate_report(
+    async def _normalize_and_validate_local_report(
+        self, report_path: Path, unit_dir: Path
+    ) -> ScriptResult:
+        sort_result = await _run_script(SORT_SCRIPT, str(report_path))
+        if sort_result.returncode:
+            return ScriptResult(
+                returncode=2,
+                stdout="",
+                stderr=f"CSV normalization failed: {_script_error(sort_result)}",
+            )
+        return await _run_script(
+            VALIDATE_REPORT_SCRIPT,
+            str(report_path),
+            "--work-unit-dir",
+            str(unit_dir),
+        )
+
+    async def _normalize_and_validate_global_report(
         self, report_path: Path, slices_dir: str
     ) -> ScriptResult:
         sort_result = await _run_script(SORT_SCRIPT, str(report_path))
@@ -441,14 +635,6 @@ class WorkflowNodes:
             return ScriptResult(
                 returncode=2,
                 stdout="",
-                stderr=(
-                    "root-cause CSV normalization failed: "
-                    f"{_script_error(sort_result)}"
-                ),
+                stderr=f"CSV normalization failed: {_script_error(sort_result)}",
             )
-        return await self._validate_report(report_path, slices_dir)
-
-    def _analysis_failure(self, error: str) -> dict[str, Any]:
-        return {
-            "validation_error": error,
-        }
+        return await self._validate_global_report(report_path, slices_dir)

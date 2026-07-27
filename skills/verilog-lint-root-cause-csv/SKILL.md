@@ -1,130 +1,68 @@
 ---
 name: verilog-lint-root-cause-csv
-description: Use for cross-level Verilog lint root-cause analysis from prepared RTL, slices, and filelist inputs.
+description: Use for source-based Verilog/SystemVerilog lint root-cause analysis and global root consolidation in the prepared CSV workflow.
 ---
 
 # Verilog Lint Root-Cause CSV
 
-## Input
+Perform only the role and write only the exact output path supplied by the
+outer workflow. Treat generated paths as workflow artifacts, not as design
+evidence. Do not prepare inputs, classify modules, build slices, sort, validate,
+publish, or create timestamped reports.
 
-Require these three prepared design-evidence paths:
+Write every CSV with a CSV-aware writer instead of concatenating fields.
+Preserve commas, quotes, and newlines with standard CSV quoting.
 
-- the `rtl/` source directory;
-- the `slices/` directory;
-- the project `filelist.f`.
+## Group roots and causal relationships
 
-Also require one exact draft CSV output path from the outer workflow. Treat it
-as an output target, not as design evidence.
+Group findings under one root only when they share the same underlying defect
+mechanism and concrete repair strategy. Treat a shared lint rule, module, file,
+level, hierarchy, or similar wording as neither sufficient evidence nor an
+automatic barrier to grouping. Keep findings separate when either the mechanism
+or repair differs.
 
-Do not read the original source archive, original lint CSV, hierarchy work
-directory, or slice policy. Do not preprocess inputs, classify modules, build
-slices, sort, validate, publish, or create timestamped reports. The outer
-workflow owns those operations.
+Use a parent only when source, hierarchy, or signal-flow evidence establishes
+that one distinct normal root directly causes or enables another root with a
+different mechanism or repair.
 
-## Analyze
+- Merge a downstream finding into the upstream root when fixing the upstream
+  root fully removes it and no separate repair remains.
+- Otherwise, point the child to its nearest existing direct parent.
+- Use `/` when direction is unproven or multiple parents remain plausible.
+- Never invent a parent or attach `误报` to one.
+- State the child's mechanism and direct causal link in `root_note`, and its
+  distinct repair and required order in `fix_suggestion`.
 
-Read `slices/coverage.json` first. Then process the exclusive lint scopes in
-this order without merging their `lint.csv` files:
+## Analyze one work unit
 
-```text
-level1 -> level2 -> level3 -> level4 -> isolated
-```
+Use only the assigned work-unit directory:
 
-For each scope:
+- `lint.csv` exclusively owns every alert in the unit;
+- `rtl/` contains physically copied source evidence;
+- `filelist.f` preserves relevant source order, macros, and include paths;
+- `context.json` identifies primary and dependency files;
+- instance units also provide `hierarchy_tree.txt`.
 
-- use `context.json` for module source paths and available structural metadata;
-- use `lint.csv` for exclusively owned alerts;
-- use the project `filelist.f` for compile order and macros;
-- when `coverage.json` reports `hierarchy_available=true`, use
-  `slices/hierarchy_tree.txt` for active instance context; otherwise analyze
-  directly from the module sources without inferring instance paths;
-- for every lint row, open `rtl/<source_file>` at `source_line` and inspect the
-  relevant enclosing construct before assigning its root cause, grouping, fix,
-  or false-positive status;
-- never make any decision from `message_id` or `contents` alone; if the
-  corresponding source and relevant context have not been inspected, do not
-  finalize that row;
-- treat a nonempty `hierarchy` field as report-backed, tree-validated instance
-  context; treat an empty field as a module-scope finding, and keep
-  semicolon-separated paths as one source warning rather than multiple leaf
-  violations;
-- analyze isolated rows against their source and child instances; absence from
-  the active hierarchy alone does not prove a false positive.
+Keep any temporary helper artifacts inside the unit's `work/` directory. Do not
+read another unit or write outside the assigned unit.
 
-After completing each scope, write its analyzed rows into the one supplied
-draft while retaining all rows from earlier scopes. Do not create separate
-per-scope reports. After all five scopes are present, consolidate that same
-draft into the global result: merge cross-level rows when they share the same
-defect mechanism and concrete repair strategy, make their category fields
-consistent, and keep every leaf row exactly once.
+For every lint row, open `rtl/<source_file>` at `source_line` and inspect the
+enclosing construct and relevant signal, parameter, instance, or control-flow
+context. Never decide from `message_id` or `contents` alone. A nonempty
+`hierarchy` is instance evidence; an empty value is module-scope evidence.
+Semicolon-separated paths still represent one source warning.
 
-Treat a lint finding as a false positive when the reported code is intentional,
-conforms to the project design intent, and requires no RTL change. A rule may
-correctly recognize a code pattern and still be a false positive when it cannot
-account for that design intent. If the RTL requires a change, use a normal root;
-if the design intent cannot be confirmed, continue the analysis instead of
-marking the finding as a false positive.
+When `lint.csv` is large, run
+`python skills/verilog-lint-root-cause-csv/scripts/inspect_work_unit.py <work-unit-dir>`
+to summarize it, page rows with `--offset` and `--limit`, or retrieve one row
+with `--vio-id`. The helper only reads artifacts and makes no semantic decision.
 
-Maintain one global defect-class view across every scope. Assign the same
-`root_id` when findings share the same underlying defect mechanism and can be
-resolved by the same concrete repair strategy:
+Treat a finding as `误报` when the reported code is intentional, conforms to
+the project design intent, requires no RTL change, and this conclusion is
+supported by the reopened source and available context. If an RTL change is
+required, use a normal root. If intent is unconfirmed, continue investigating.
 
-- findings do not need to occur at the same source location or be cleared by
-  one source edit;
-- do not group findings only because they share a level, lint rule, or generic
-  repair wording;
-- keep findings separate when their defect mechanisms or required repairs
-  differ, even if they share the same lint rule;
-- allow findings from different rules or levels to share one root when both
-  their defect mechanism and concrete repair strategy match.
-
-### Derived roots
-
-Use `parent_root_id` only to record direct causal dependence between two
-distinct normal roots. Treat a root as derived only when source, hierarchy, or
-signal-flow evidence shows that the parent defect causes or enables the child
-defect, while the child still has a different defect mechanism or requires a
-different concrete repair.
-
-Apply these rules:
-
-- if two findings share both mechanism and repair, merge them under one
-  `root_id` instead of creating a parent-child pair;
-- if repairing the parent completely removes a downstream finding and no
-  separate child repair remains, assign that finding to the parent root;
-- make every child point to its nearest direct parent, not a remote ancestor;
-- require both parent and child to be normal roots backed by at least one lint
-  row; never invent an empty parent root and never attach `误报` to a parent;
-- when several roots are merely related, correlated, or in the same module,
-  level, rule, or signal path, keep `parent_root_id=/` unless one direct causal
-  direction is supported;
-- when more than one possible parent exists but no single direct parent can be
-  established, use `/` rather than guessing;
-- allow a confirmed parent-child relationship to cross slice levels, and
-  resolve it during global consolidation;
-- state the child's local mechanism and its causal link to the parent in
-  `root_note`; state the child-specific repair and any required repair order in
-  `fix_suggestion`.
-
-For example, violations caused directly by one combinationally generated clock
-and cleared by replacing it with a clock enable belong to one root. Create a
-derived child only if a separate downstream clock-generation construct is
-caused by that root and still requires its own RTL change; point that child to
-the generated-clock root.
-
-Map leaf fields directly from each scope `lint.csv`:
-
-```text
-leaf_violation_id   = vio_id
-leaf_violation_note = message_id:contents
-```
-
-Preserve `message_id` and `contents` exactly.
-
-## Write the draft
-
-Write or revise only the exact draft path supplied by the outer workflow. Keep
-the same path throughout all revisions. Write exactly these columns in order:
+Write the exact local report path with these columns:
 
 ```text
 root_id,root_note,fix_suggestion,root_file_path,root_file_start,root_file_end,parent_root_id,leaf_violation_id,leaf_violation_note
@@ -132,46 +70,54 @@ root_id,root_note,fix_suggestion,root_file_path,root_file_start,root_file_end,pa
 
 Apply these rules:
 
-- write one output row for every lint row and exactly one leaf ID per row;
-- number normal roots consecutively as `root_001` through `root_N`; false
-  positives do not consume a number;
-- repeat identical `root_note`, `fix_suggestion`, and `parent_root_id` values on
-  every row sharing a normal root ID;
-- write `root_note` and `fix_suggestion` in concise Chinese;
-- use the exact POSIX path relative to the supplied `rtl/` directory for
-  `root_file_path` (for example, `core/a/foo.v`) and record the concrete defect
-  occurrence for that leaf; never collapse nested paths to a basename;
-- use 1-based inclusive line bounds for that occurrence that do not exceed the
-  source file; rows sharing a root ID may have different occurrence paths and
-  ranges;
+- write exactly one row for each `lint.csv` row;
+- set `leaf_violation_id=vio_id`;
+- set `leaf_violation_note=message_id:contents` without changing either input;
+- number normal local roots consecutively from `root_001`;
+- write concise Chinese `root_note` and `fix_suggestion`;
+- use a normalized POSIX path relative to the unit `rtl/` directory and valid
+  1-based inclusive source lines for each leaf's concrete occurrence;
+- repeat identical category fields for rows sharing a normal root;
 - use `/` for an independent root's `parent_root_id`;
-- for a false positive, use `root_id=误报`, explain in `root_note` why the
-  code is intentional and needs no RTL change, and use `/` for
-  `fix_suggestion` and `parent_root_id`;
-- preserve commas, quotes, and newlines with standard CSV quoting;
-- do not add columns or combine leaf IDs.
+- for `误报`, explain the source-backed reason in `root_note` and use `/` for
+  both `fix_suggestion` and `parent_root_id`.
 
-## Review
+After writing, perform a second pass over every row. Reopen its lint entry,
+reported source location, and recorded root location. Confirm exact leaf
+fields, valid locations, consistent grouping, supported false-positive
+decisions, and valid parent relationships. Revise the same file until this
+source-based review is complete.
 
-Before finishing, perform a second source-based pass over every draft row. For
-each row, locate its original entry in the corresponding scope `lint.csv`,
-reopen `rtl/<source_file>` at `source_line`, inspect the relevant enclosing
-construct, and reopen the recorded `root_file_path` and root range when they
-differ from the leaf location. Never approve a row from the lint text or draft
-text alone. Confirm:
+## Consolidate local roots globally
 
-- every `vio_id` occurs exactly once and both leaf fields are exact;
-- every normal root groups one defect mechanism and one concrete repair
-  strategy, while each row records its own valid occurrence location;
-- every derived root has source-backed direct causality, remains distinct from
-  its parent under the grouping rules, and points to the nearest existing
-  parent;
-- every false-positive decision is supported by reopened source and context
-  showing that the code is intentional, conforms to project design intent, and
-  requires no RTL change;
-- repeated normal roots have consistent category fields and every parent root
-  exists;
-- the schema is unchanged and authored natural-language fields are Chinese.
+Read every row of the supplied local-root catalog and write the exact global
+mapping target with these columns:
 
-Do not finish after the first draft. Revise the same draft path until this
-second-pass review is complete, then return control to the outer workflow.
+```text
+local_item_id,global_root_id,root_note,fix_suggestion,parent_global_root_id
+```
+
+Map every `local_item_id` exactly once. Maintain one defect-class view across
+all work units and levels by applying the shared grouping and causal rules
+above. Do not inspect another global mapping output.
+
+- use work-unit reports and source evidence to resolve unclear catalog items;
+- number normal global roots consecutively from `root_001`;
+- keep each normal root's Chinese note, Chinese repair, and parent consistent;
+- map a confirmed false positive to `误报`, retain a source-backed Chinese
+  reason, and use `/` for repair and parent.
+
+Do not merge by majority, textual similarity alone, or a shared level. Do not
+change or omit a local item.
+
+## Review global mapping proposals
+
+Compare every supplied proposal row by row against the local-root catalog.
+Resolve every `local_item_id`, root definition, grouping, false-positive
+decision, and parent relationship. Agreement is not evidence. When proposals
+differ or evidence is ambiguous, reopen the corresponding local report,
+`lint.csv`, and RTL before deciding.
+
+Write one complete mapping to the exact supplied path using the five-column
+global mapping schema. Do not mention proposals, comparison, voting, internal
+generation, model settings, or review machinery in any field.

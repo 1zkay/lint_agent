@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -73,6 +74,16 @@ class ModuleRange:
     analysis_file: str
     start: int
     end: int
+
+
+@dataclass(frozen=True)
+class FileModuleRangeIndex:
+    file: Path
+    ranges: tuple[ModuleRange, ...]
+    starts: tuple[int, ...]
+
+
+type ModuleRangeIndex = dict[str, tuple[FileModuleRangeIndex, ...]]
 
 
 @dataclass
@@ -524,6 +535,28 @@ def normalize_reported_hierarchy(value: str) -> str:
     return ".".join(instance for instance in instances if instance)
 
 
+def build_module_range_index(ranges: list[ModuleRange]) -> ModuleRangeIndex:
+    by_file: dict[Path, list[ModuleRange]] = defaultdict(list)
+    for item in ranges:
+        by_file[item.file.resolve()].append(item)
+
+    by_basename: dict[str, list[FileModuleRangeIndex]] = defaultdict(list)
+    for source_file, file_ranges in by_file.items():
+        ordered = tuple(sorted(file_ranges, key=lambda item: (item.start, item.end)))
+        by_basename[source_file.name].append(
+            FileModuleRangeIndex(
+                file=source_file,
+                ranges=ordered,
+                starts=tuple(item.start for item in ordered),
+            )
+        )
+
+    return {
+        basename: tuple(sorted(files, key=lambda item: item.file.as_posix()))
+        for basename, files in by_basename.items()
+    }
+
+
 def contains_hierarchy_path(contents: str, path: str) -> bool:
     needle = path.replace(".", "/")
     start = 0
@@ -562,42 +595,55 @@ def reported_hierarchy_paths(contents: str, candidates: list[str]) -> list[str]:
 
 
 def locate_module_for_line(
-    ranges: list[ModuleRange],
+    index: ModuleRangeIndex,
     lint_path: str,
     line: int,
 ) -> ModuleRange | None:
     norm = normalize_lint_file(lint_path)
     basename = Path(norm).name
-    line_hits = [
-        item
-        for item in ranges
-        if item.start <= line <= item.end
-    ]
 
-    def path_matches(candidate: str) -> bool:
-        return (
-            norm == candidate
-            or norm.endswith(f"/{candidate}")
-            or candidate.endswith(f"/{norm}")
-        )
-
-    exact_hits = [
-        item
-        for item in line_hits
-        if path_matches(item.analysis_file)
-        or norm == item.file.resolve().as_posix()
-    ]
-    hits = exact_hits or [item for item in line_hits if item.file.name == basename]
-    if not hits:
+    def path_match_score(
+        file_index: FileModuleRangeIndex,
+    ) -> tuple[int, int] | None:
+        candidate = file_index.ranges[0].analysis_file
+        if norm == candidate or norm == file_index.file.as_posix():
+            return 2, len(norm)
+        if norm.endswith(f"/{candidate}"):
+            return 1, len(candidate)
+        if candidate.endswith(f"/{norm}"):
+            return 1, len(norm)
         return None
 
-    matching_files = {item.file.resolve() for item in hits}
-    if len(matching_files) > 1:
-        candidates = ", ".join(sorted(item.as_posix() for item in matching_files))
+    basename_files = index.get(basename, ())
+    scored_files = [
+        (score, file_index)
+        for file_index in basename_files
+        if (score := path_match_score(file_index)) is not None
+    ]
+    if scored_files:
+        best_score = max(score for score, _ in scored_files)
+        candidate_files = tuple(
+            file_index
+            for score, file_index in scored_files
+            if score == best_score
+        )
+    else:
+        candidate_files = basename_files
+    if not candidate_files:
+        return None
+
+    if len(candidate_files) > 1:
+        candidates = ", ".join(item.file.as_posix() for item in candidate_files)
         raise ValueError(
             f"ambiguous lint source path {lint_path!r} at line {line}: {candidates}"
         )
-    return min(hits, key=lambda item: item.end - item.start)
+
+    file_index = candidate_files[0]
+    position = bisect_right(file_index.starts, line) - 1
+    if position < 0:
+        return None
+    item = file_index.ranges[position]
+    return item if line <= item.end else None
 
 
 def parse_lint_csv(
@@ -606,6 +652,7 @@ def parse_lint_csv(
     module_to_paths: dict[str, list[str]] | None,
 ) -> list[MappedLint]:
     mapped: list[MappedLint] = []
+    range_index = build_module_range_index(ranges)
 
     with csv_path.open(newline="", encoding="utf-8-sig", errors="replace") as handle:
         reader = csv.DictReader(handle)
@@ -654,7 +701,7 @@ def parse_lint_csv(
                 raise ValueError(
                     f"{csv_path}:{row_index + 1}: source path and line must be present"
                 )
-            located = locate_module_for_line(ranges, source_path, source_line)
+            located = locate_module_for_line(range_index, source_path, source_line)
             if located is None:
                 raise ValueError(
                     f"{csv_path}:{row_index + 1}: cannot map "
