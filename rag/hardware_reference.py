@@ -27,8 +27,6 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field
-
 from langchain.tools import tool
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
@@ -57,14 +55,6 @@ class PdfAgenticRagState(MessagesState):
     """Agentic RAG graph state."""
 
     rewrite_count: int
-
-
-class GradeDocuments(BaseModel):
-    """Binary relevance score for retrieved context."""
-
-    binary_score: Literal["yes", "no"] = Field(
-        description="Return 'yes' if the retrieved context is relevant, otherwise 'no'."
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -496,16 +486,15 @@ class HardwareReferenceAgenticRAGService:
                 "You are a grader assessing whether retrieved hardware-reference context is relevant "
                 "to the user's question.\n"
                 "If the context contains clauses, synthesis guidance, semantics, or terminology that can "
-                "help answer the question, return 'yes'. Otherwise return 'no'.\n\n"
+                "help answer the question, return exactly 'yes'. Otherwise return exactly 'no'. "
+                "Do not include any other text.\n\n"
                 f"Question:\n{question}\n\n"
                 f"Retrieved context JSON:\n{json.dumps(payload, ensure_ascii=False)}"
             )
-            response = await (
-                self._response_model
-                .with_structured_output(GradeDocuments)
-                .ainvoke([{"role": "user", "content": prompt}])
+            response = await self._response_model.ainvoke(
+                [{"role": "user", "content": prompt}]
             )
-            if response.binary_score == "yes":
+            if message_text(response).strip().lower() == "yes":
                 return "generate_answer"
             if int(state.get("rewrite_count", 0) or 0) >= self.max_rewrites:
                 return "generate_answer"
