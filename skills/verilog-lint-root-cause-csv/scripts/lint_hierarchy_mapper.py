@@ -64,9 +64,6 @@ LEGACY_LINT_INPUT_COLUMNS = (
     "lineno",
     "",
 )
-SV_FRONTEND_FALLBACK_ERROR = "Invalid nesting of always blocks and/or initializations."
-
-
 @dataclass(frozen=True)
 class ModuleRange:
     module: str
@@ -267,11 +264,7 @@ def run_yosys(
     write_script(script_path, cmd_parts)
     result = execute(script_path)
     fallback_script_path: Path | None = None
-    if (
-        result.returncode != 0
-        and has_sv
-        and SV_FRONTEND_FALLBACK_ERROR in result.stderr
-    ):
+    if result.returncode != 0:
         (work_root / "yosys.read_verilog.stdout.log").write_text(
             result.stdout,
             encoding="utf-8",
@@ -305,7 +298,7 @@ def run_yosys(
     if result.returncode != 0:
         if fallback_script_path:
             raise RuntimeError(
-                "Yosys failed after SystemVerilog frontend fallback. See logs:\n"
+                "Yosys failed after Slang frontend fallback. See logs:\n"
                 f"  read_verilog script: {script_path}\n"
                 f"  read_verilog stdout: {work_root / 'yosys.read_verilog.stdout.log'}\n"
                 f"  read_verilog stderr: {work_root / 'yosys.read_verilog.stderr.log'}\n"
