@@ -14,22 +14,22 @@ from memory.long_term import AgentContext
 
 from .nodes import WorkflowNodes, read_manifest
 from .state import (
+    AnalysisBatchInput,
+    AnalysisBatchOutput,
+    AnalysisBatchState,
     MergeCandidateInput,
     MergeCandidateOutput,
     MergeCandidateState,
     WorkflowInput,
     WorkflowOutput,
     WorkflowState,
-    WorkUnitInput,
-    WorkUnitOutput,
-    WorkUnitState,
 )
 
 
-def _route_after_work_unit(
-    state: WorkUnitState,
-) -> Literal["analyze_work_unit", "__end__"]:
-    return END if state.get("work_unit_results") else "analyze_work_unit"
+def _route_after_analysis_batch(
+    state: AnalysisBatchState,
+) -> Literal["analyze_batch", "__end__"]:
+    return END if state.get("work_unit_results") else "analyze_batch"
 
 
 def _route_after_merge_candidate(
@@ -50,16 +50,16 @@ def _route_after_adjudication(
     return "adjudicate_root_causes"
 
 
-def _build_work_unit_workflow(nodes: WorkflowNodes) -> Any:
+def _build_analysis_batch_workflow(nodes: WorkflowNodes) -> Any:
     builder = StateGraph(
-        WorkUnitState,
+        AnalysisBatchState,
         context_schema=AgentContext,
-        input_schema=WorkUnitInput,
-        output_schema=WorkUnitOutput,
+        input_schema=AnalysisBatchInput,
+        output_schema=AnalysisBatchOutput,
     )
-    builder.add_node("analyze_work_unit", nodes.analyze_work_unit)
-    builder.add_edge(START, "analyze_work_unit")
-    builder.add_conditional_edges("analyze_work_unit", _route_after_work_unit)
+    builder.add_node("analyze_batch", nodes.analyze_batch)
+    builder.add_edge(START, "analyze_batch")
+    builder.add_conditional_edges("analyze_batch", _route_after_analysis_batch)
     return builder.compile()
 
 
@@ -81,45 +81,47 @@ def _build_merge_candidate_workflow(nodes: WorkflowNodes) -> Any:
 def build_workflow(
     *,
     classifier_agent: Any,
-    work_unit_agent: Any,
+    analysis_batch_agent: Any,
     merge_agent: Any,
     judge_agent: Any,
-    work_unit_max_concurrency: int,
+    analysis_batch_max_concurrency: int,
     ensemble_size: int,
 ) -> Any:
     """Build the fixed workflow with path-only shared state."""
 
-    if work_unit_max_concurrency < 1:
-        raise ValueError("work_unit_max_concurrency must be at least 1")
+    if analysis_batch_max_concurrency < 1:
+        raise ValueError("analysis_batch_max_concurrency must be at least 1")
     if ensemble_size < 1:
         raise ValueError("ensemble_size must be at least 1")
     nodes = WorkflowNodes(
         classifier_agent=classifier_agent,
-        work_unit_agent=work_unit_agent,
+        analysis_batch_agent=analysis_batch_agent,
         merge_agent=merge_agent,
         judge_agent=judge_agent,
         ensemble_size=ensemble_size,
     )
-    work_unit_workflow = _build_work_unit_workflow(nodes)
+    analysis_batch_workflow = _build_analysis_batch_workflow(nodes)
     merge_candidate_workflow = _build_merge_candidate_workflow(nodes)
 
-    async def analyze_work_units(
+    async def analyze_batches(
         state: WorkflowState,
         config: RunnableConfig,
         runtime: Runtime[AgentContext],
-    ) -> WorkUnitOutput:
-        inputs: list[WorkUnitInput] = [
+    ) -> AnalysisBatchOutput:
+        inputs: list[AnalysisBatchInput] = [
             {
-                "unit_id": unit_id,
-                "work_unit_dir": str(unit_dir),
+                "work_units": [
+                    {"unit_id": unit_id, "work_unit_dir": str(unit_dir)}
+                    for unit_id, unit_dir in batch
+                ],
             }
-            for unit_id, unit_dir in read_manifest(
+            for batch in read_manifest(
                 Path(state["slices_dir"])
-            ).work_units
+            ).analysis_batches
         ]
         batch_config = dict(config)
-        batch_config["max_concurrency"] = work_unit_max_concurrency
-        outputs: list[WorkUnitOutput] = await work_unit_workflow.abatch(
+        batch_config["max_concurrency"] = analysis_batch_max_concurrency
+        outputs: list[AnalysisBatchOutput] = await analysis_batch_workflow.abatch(
             inputs,
             config=batch_config,
             context=runtime.context or AgentContext(),
@@ -148,10 +150,10 @@ def build_workflow(
 
     def route_after_slicing(
         state: WorkflowState,
-    ) -> Literal["classify_and_slice", "analyze_work_units"]:
+    ) -> Literal["classify_and_slice", "analyze_batches"]:
         if not state.get("slices_dir"):
             return "classify_and_slice"
-        return "analyze_work_units"
+        return "analyze_batches"
 
     def route_after_catalog(state: WorkflowState) -> list[Send]:
         ensemble_dir = Path(state["run_dir"]) / "work" / "ensemble"
@@ -178,7 +180,7 @@ def build_workflow(
     )
     builder.add_node("prepare_inputs", nodes.prepare_inputs)
     builder.add_node("classify_and_slice", nodes.classify_and_slice)
-    builder.add_node("analyze_work_units", analyze_work_units)
+    builder.add_node("analyze_batches", analyze_batches)
     builder.add_node("build_local_root_catalog", nodes.build_local_root_catalog)
     builder.add_node("analyze_merge_candidate", analyze_merge_candidate)
     builder.add_node("adjudicate_root_causes", nodes.adjudicate_root_causes)
@@ -189,9 +191,9 @@ def build_workflow(
     builder.add_conditional_edges(
         "classify_and_slice",
         route_after_slicing,
-        ["classify_and_slice", "analyze_work_units"],
+        ["classify_and_slice", "analyze_batches"],
     )
-    builder.add_edge("analyze_work_units", "build_local_root_catalog")
+    builder.add_edge("analyze_batches", "build_local_root_catalog")
     builder.add_conditional_edges(
         "build_local_root_catalog",
         route_after_catalog,

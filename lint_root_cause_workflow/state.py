@@ -44,16 +44,20 @@ class WorkflowState(WorkflowInput, total=False):
     merge_candidate_results: Annotated[list[MergeCandidateResult], operator.add]
 
 
-class WorkUnitInput(TypedDict):
+class WorkUnitAssignment(TypedDict):
     unit_id: str
     work_unit_dir: str
 
 
-class WorkUnitOutput(TypedDict):
+class AnalysisBatchInput(TypedDict):
+    work_units: list[WorkUnitAssignment]
+
+
+class AnalysisBatchOutput(TypedDict):
     work_unit_results: list[WorkUnitResult]
 
 
-class WorkUnitState(WorkUnitInput, total=False):
+class AnalysisBatchState(AnalysisBatchInput, total=False):
     validation_error: str
     work_unit_results: list[WorkUnitResult]
 

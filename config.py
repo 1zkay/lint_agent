@@ -184,8 +184,8 @@ class Config:
         self.lint_root_cause_keep_intermediates = self._bool_env(
             "LINT_ROOT_CAUSE_KEEP_INTERMEDIATES", "true"
         )
-        self.lint_root_cause_work_unit_max_concurrency = int(
-            os.getenv("LINT_ROOT_CAUSE_WORK_UNIT_MAX_CONCURRENCY", "3")
+        self.lint_root_cause_analysis_batch_max_concurrency = int(
+            os.getenv("LINT_ROOT_CAUSE_ANALYSIS_BATCH_MAX_CONCURRENCY", "3")
         )
         self.lint_root_cause_ensemble_size = int(
             os.getenv("LINT_ROOT_CAUSE_ENSEMBLE_SIZE", "3")

@@ -33,9 +33,14 @@ different mechanism or repair.
 - State the child's mechanism and direct causal link in `root_note`, and its
   distinct repair and required order in `fix_suggestion`.
 
-## Analyze one work unit
+## Analyze assigned work units
 
-Use only the assigned work-unit directory:
+Use only the work-unit directories assigned in the current batch. Treat every
+unit independently: never share a local root or root numbering across units,
+and write each exact report target supplied by the workflow. A batch may contain
+both module and instance units from the same slice level.
+
+Within each unit:
 
 - `lint.csv` exclusively owns every alert in the unit;
 - `rtl/` contains physically copied source evidence;
@@ -43,8 +48,8 @@ Use only the assigned work-unit directory:
 - `context.json` identifies primary and dependency files;
 - instance units also provide `hierarchy_tree.txt`.
 
-Keep any temporary helper artifacts inside the unit's `work/` directory. Do not
-read another unit or write outside the assigned unit.
+Keep any temporary helper artifacts inside that unit's `work/` directory. Do
+not read an unassigned unit or write outside the assigned units.
 
 For every lint row, open `rtl/<source_file>` at `source_line` and inspect the
 enclosing construct and relevant signal, parameter, instance, or control-flow

@@ -18,11 +18,11 @@ not preprocess inputs, build slices, analyze lint root causes, or modify files.
 """.strip()
 
 
-ROOT_CAUSE_WORK_UNIT_SYSTEM_PROMPT = """
+ROOT_CAUSE_ANALYSIS_BATCH_SYSTEM_PROMPT = """
 You are a senior Verilog/SystemVerilog lint root-cause analyst. Analyze only the
-assigned physical work unit and follow the bundled
-verilog-lint-root-cause-csv skill. Use the copied source evidence inside that
-unit and write only its exact local report target.
+assigned batch of physical work units and follow the bundled
+verilog-lint-root-cause-csv skill. Treat every work unit independently, use only
+its copied source evidence, and write each exact local report target.
 """.strip()
 
 
@@ -103,25 +103,27 @@ exactly:
 """.strip()
 
 
-def build_work_unit_prompt(
+def build_analysis_batch_prompt(
     *,
-    work_unit_dir: str,
-    draft_csv: str,
+    members: list[tuple[str, str, str]],
     previous_error: str,
 ) -> str:
     revision = (
         f"""
-The existing draft failed deterministic validation. Reopen and revise the same
-draft file; do not create another report. Validator output:
+The assigned reports failed deterministic validation. Revise only these exact
+targets. Validator output:
 {previous_error}
 """.strip()
         if previous_error
-        else "Create the first draft at the exact local report path above."
+        else "Create every member report at its exact local report path."
+    )
+    assignments = "\n".join(
+        f"- unit {unit_id}\n  directory: {unit_dir}\n  report: {report_path}"
+        for unit_id, unit_dir, report_path in members
     )
     return f"""
-Assigned work unit: {work_unit_dir}
-
-Local report path: {draft_csv}
+Assigned work units and report targets:
+{assignments}
 
 {revision}
 """.strip()

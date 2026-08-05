@@ -20,10 +20,22 @@ from _contract import (
 )
 
 
+WorkUnit = tuple[str, Path]
+AnalysisBatch = tuple[WorkUnit, ...]
+
+
 @dataclass(frozen=True)
 class WorkUnitManifest:
     hierarchy_available: bool
-    work_units: tuple[tuple[str, Path], ...]
+    analysis_batches: tuple[AnalysisBatch, ...]
+
+    @property
+    def work_units(self) -> tuple[WorkUnit, ...]:
+        return tuple(
+            work_unit
+            for batch in self.analysis_batches
+            for work_unit in batch
+        )
 
 
 def parse_work_unit_id(value: str) -> tuple[str, str]:
@@ -53,46 +65,62 @@ def read_manifest(slices_dir: Path) -> WorkUnitManifest:
         or set(data) != {
             "schema_version",
             "hierarchy_available",
-            "work_units",
+            "analysis_batches",
         }
         or data.get("schema_version") != SLICE_SCHEMA_VERSION
         or not isinstance(data.get("hierarchy_available"), bool)
-        or not isinstance(data.get("work_units"), list)
-        or not data["work_units"]
+        or not isinstance(data.get("analysis_batches"), list)
+        or not data["analysis_batches"]
     ):
         raise ValueError(f"{manifest_path}: invalid work-unit manifest")
 
-    result: list[tuple[str, Path]] = []
+    batches: list[AnalysisBatch] = []
     seen: set[str] = set()
-    for value in data["work_units"]:
-        if not isinstance(value, str) or not value or value in seen:
-            raise ValueError(f"{manifest_path}: invalid or duplicate work-unit path")
-        parse_work_unit_id(value)
-        relative = Path(value)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError(f"{manifest_path}: unsafe work-unit path {value!r}")
-        unit_dir = (root / relative).resolve()
-        try:
-            unit_dir.relative_to(root)
-        except ValueError as exc:
+    for batch_index, values in enumerate(data["analysis_batches"]):
+        if not isinstance(values, list) or not values:
             raise ValueError(
-                f"{manifest_path}: work-unit path escapes slices/: {value}"
-            ) from exc
-        if not unit_dir.is_dir():
-            raise FileNotFoundError(f"work-unit directory not found: {unit_dir}")
-        for name in ("rtl", "work", "lint.csv", "filelist.f", "context.json"):
-            path = unit_dir / name
-            if not (
-                path.is_dir()
-                if name in {"rtl", "work"}
-                else path.is_file()
-            ):
-                raise FileNotFoundError(f"work-unit artifact not found: {path}")
-        seen.add(value)
-        result.append((value, unit_dir))
+                f"{manifest_path}: invalid analysis batch at index {batch_index}"
+            )
+        result: list[tuple[str, Path]] = []
+        batch_scope: str | None = None
+        for value in values:
+            if not isinstance(value, str) or not value or value in seen:
+                raise ValueError(
+                    f"{manifest_path}: invalid or duplicate work-unit path"
+                )
+            scope, _ = parse_work_unit_id(value)
+            if batch_scope is None:
+                batch_scope = scope
+            elif scope != batch_scope:
+                raise ValueError(
+                    f"{manifest_path}: analysis batch mixes slice levels"
+                )
+            relative = Path(value)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError(f"{manifest_path}: unsafe work-unit path {value!r}")
+            unit_dir = (root / relative).resolve()
+            try:
+                unit_dir.relative_to(root)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{manifest_path}: work-unit path escapes slices/: {value}"
+                ) from exc
+            if not unit_dir.is_dir():
+                raise FileNotFoundError(f"work-unit directory not found: {unit_dir}")
+            for name in ("rtl", "work", "lint.csv", "filelist.f", "context.json"):
+                path = unit_dir / name
+                if not (
+                    path.is_dir()
+                    if name in {"rtl", "work"}
+                    else path.is_file()
+                ):
+                    raise FileNotFoundError(f"work-unit artifact not found: {path}")
+            seen.add(value)
+            result.append((value, unit_dir))
+        batches.append(tuple(result))
     return WorkUnitManifest(
         hierarchy_available=data["hierarchy_available"],
-        work_units=tuple(result),
+        analysis_batches=tuple(batches),
     )
 
 

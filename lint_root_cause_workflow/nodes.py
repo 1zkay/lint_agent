@@ -21,11 +21,11 @@ from memory.long_term import AgentContext
 from .prompts import (
     SLICE_POLICY_PARSER,
     build_adjudication_prompt,
+    build_analysis_batch_prompt,
     build_classifier_prompt,
     build_global_merge_prompt,
-    build_work_unit_prompt,
 )
-from .state import MergeCandidateState, WorkflowState, WorkUnitState
+from .state import AnalysisBatchState, MergeCandidateState, WorkflowState
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -138,13 +138,13 @@ class WorkflowNodes:
         self,
         *,
         classifier_agent: Any,
-        work_unit_agent: Any,
+        analysis_batch_agent: Any,
         merge_agent: Any,
         judge_agent: Any,
         ensemble_size: int,
     ) -> None:
         self.classifier_agent = classifier_agent
-        self.work_unit_agent = work_unit_agent
+        self.analysis_batch_agent = analysis_batch_agent
         self.merge_agent = merge_agent
         self.judge_agent = judge_agent
         self.ensemble_size = ensemble_size
@@ -295,56 +295,84 @@ class WorkflowNodes:
             "slices_dir": "",
         }
 
-    async def analyze_work_unit(
+    async def analyze_batch(
         self,
-        state: WorkUnitState,
+        state: AnalysisBatchState,
         config: RunnableConfig,
         runtime: Runtime[AgentContext],
     ) -> dict[str, Any]:
-        unit_id = state["unit_id"]
-        unit_dir = Path(state["work_unit_dir"]).resolve()
-        slices_dir = unit_dir.parents[2]
-        expected = (slices_dir / unit_id).resolve()
-        if unit_dir != expected:
-            raise RuntimeError(f"work-unit path does not match unit_id: {unit_id}")
-        draft_csv = unit_dir / "local_root_cause.csv"
-        previous_error = state.get("validation_error", "")
+        assignments = state["work_units"]
+        if not assignments:
+            raise RuntimeError("analysis batch is empty")
 
-        if draft_csv.is_file() and not previous_error:
+        members: list[tuple[str, Path, Path]] = []
+        seen: set[str] = set()
+        slices_dir: Path | None = None
+        for assignment in assignments:
+            unit_id = assignment["unit_id"]
+            unit_dir = Path(assignment["work_unit_dir"]).resolve()
+            current_slices_dir = unit_dir.parents[2]
+            expected = (current_slices_dir / unit_id).resolve()
+            if unit_id in seen or unit_dir != expected:
+                raise RuntimeError(
+                    f"analysis batch has an invalid work unit: {unit_id}"
+                )
+            if slices_dir is None:
+                slices_dir = current_slices_dir
+            elif current_slices_dir != slices_dir:
+                raise RuntimeError("analysis batch spans multiple slices directories")
+            seen.add(unit_id)
+            members.append((unit_id, unit_dir, unit_dir / "local_root_cause.csv"))
+
+        pending_members: list[tuple[str, Path, Path]] = []
+        validation_errors: list[str] = []
+        for unit_id, unit_dir, report_path in members:
+            if not report_path.is_file():
+                pending_members.append((unit_id, unit_dir, report_path))
+                continue
             validation = await self._normalize_and_validate_local_report(
-                draft_csv, unit_dir
+                report_path, unit_dir
             )
-            if validation.returncode == 0:
-                return self._work_unit_success(unit_id, draft_csv)
-            if validation.returncode != 2:
+            if validation.returncode == 2:
+                pending_members.append((unit_id, unit_dir, report_path))
+                validation_errors.append(f"{unit_id}: {_script_error(validation)}")
+            elif validation.returncode:
                 raise RuntimeError(
                     f"local report validator failed: {_script_error(validation)}"
                 )
-            previous_error = _script_error(validation)
+        if not pending_members:
+            return self._analysis_batch_success(members)
 
-        prompt = build_work_unit_prompt(
-            work_unit_dir=str(unit_dir),
-            draft_csv=str(draft_csv),
-            previous_error=previous_error,
+        prompt = build_analysis_batch_prompt(
+            members=[
+                (unit_id, str(unit_dir), str(report_path))
+                for unit_id, unit_dir, report_path in pending_members
+            ],
+            previous_error="\n".join(validation_errors),
         )
-        await self.work_unit_agent.ainvoke(
+        await self.analysis_batch_agent.ainvoke(
             {"messages": [{"role": "user", "content": prompt}]},
             config=config,
             context=_agent_context(runtime),
         )
-        if not draft_csv.is_file():
-            return {"validation_error": f"work unit did not create {draft_csv}"}
 
-        validation = await self._normalize_and_validate_local_report(
-            draft_csv, unit_dir
-        )
-        if validation.returncode == 2:
-            return {"validation_error": _script_error(validation)}
-        if validation.returncode:
-            raise RuntimeError(
-                f"local report validator failed: {_script_error(validation)}"
+        validation_errors = []
+        for unit_id, unit_dir, report_path in members:
+            if not report_path.is_file():
+                validation_errors.append(f"{unit_id}: report is missing")
+                continue
+            validation = await self._normalize_and_validate_local_report(
+                report_path, unit_dir
             )
-        return self._work_unit_success(unit_id, draft_csv)
+            if validation.returncode == 2:
+                validation_errors.append(f"{unit_id}: {_script_error(validation)}")
+            elif validation.returncode:
+                raise RuntimeError(
+                    f"local report validator failed: {_script_error(validation)}"
+                )
+        if validation_errors:
+            return {"validation_error": "\n".join(validation_errors)}
+        return self._analysis_batch_success(members)
 
     async def build_local_root_catalog(
         self, state: WorkflowState
@@ -571,11 +599,14 @@ class WorkflowNodes:
         return [paths[candidate_id] for candidate_id in sorted(expected_ids)]
 
     @staticmethod
-    def _work_unit_success(unit_id: str, report_path: Path) -> dict[str, Any]:
+    def _analysis_batch_success(
+        members: list[tuple[str, Path, Path]],
+    ) -> dict[str, Any]:
         return {
             "validation_error": "",
             "work_unit_results": [
                 {"unit_id": unit_id, "report_path": str(report_path)}
+                for unit_id, _, report_path in members
             ],
         }
 

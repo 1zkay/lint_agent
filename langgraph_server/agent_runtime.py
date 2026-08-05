@@ -110,8 +110,8 @@ async def lint_agent_graph(runtime: ServerRuntime | None = None) -> AsyncIterato
             base_tools,
             candidate_llm=candidate_llm,
             judge_llm=judge_llm,
-            work_unit_max_concurrency=(
-                runtime_cfg.lint_root_cause_work_unit_max_concurrency
+            analysis_batch_max_concurrency=(
+                runtime_cfg.lint_root_cause_analysis_batch_max_concurrency
             ),
             ensemble_size=runtime_cfg.lint_root_cause_ensemble_size,
             root_dir=REPO_ROOT,

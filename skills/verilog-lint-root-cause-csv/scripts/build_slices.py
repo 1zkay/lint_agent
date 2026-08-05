@@ -70,6 +70,13 @@ class WorkGroup:
     hierarchy_paths: set[str]
 
 
+@dataclass(frozen=True)
+class WorkUnitSummary:
+    unit_id: str
+    scope: str
+    families: frozenset[str]
+
+
 def parse_tree(path: Path) -> TreeInfo:
     modules: set[str] = set()
     path_to_module: dict[str, str] = {}
@@ -545,6 +552,74 @@ def group_rows(
     return groups
 
 
+def normalized_module_family(module: str) -> str:
+    family = re.sub(r"(?:_\d+)+$", "", module)
+    return re.sub(r"\d+(?=_)", "N", family)
+
+
+def summarize_work_unit(
+    unit_id: str,
+    scope: str,
+    group: WorkGroup,
+) -> WorkUnitSummary:
+    return WorkUnitSummary(
+        unit_id=unit_id,
+        scope=scope,
+        families=frozenset(
+            normalized_module_family(row["source_module"])
+            for row in group.rows
+        ),
+    )
+
+
+def build_family_batches(units: list[WorkUnitSummary]) -> list[list[str]]:
+    parents = list(range(len(units)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[max(left_root, right_root)] = min(left_root, right_root)
+
+    owners: dict[str, int] = {}
+    for index, unit in enumerate(units):
+        for family in unit.families:
+            previous = owners.setdefault(family, index)
+            union(index, previous)
+
+    groups: dict[int, list[str]] = defaultdict(list)
+    for index, unit in enumerate(units):
+        groups[find(index)].append(unit.unit_id)
+    normalized = [sorted(batch) for batch in groups.values()]
+    return sorted(normalized, key=lambda batch: tuple(batch))
+
+
+def build_analysis_batches(units: list[WorkUnitSummary]) -> list[list[str]]:
+    result: list[list[str]] = []
+    grouped: dict[str, list[WorkUnitSummary]] = defaultdict(list)
+    for unit in units:
+        grouped[unit.scope].append(unit)
+
+    for scope in WORK_UNIT_SCOPES:
+        selected = grouped.get(scope, [])
+        if not selected:
+            continue
+        if scope in LEVEL_SCOPES:
+            result.extend(build_family_batches(selected))
+        else:
+            result.extend(
+                [unit.unit_id]
+                for unit in sorted(selected, key=lambda item: item.unit_id)
+            )
+    return result
+
+
 def render_pruned_tree(tree: TreeInfo, selected_paths: set[str]) -> str:
     children: dict[str, list[str]] = defaultdict(list)
     for path in tree.path_to_module:
@@ -752,7 +827,7 @@ def main() -> int:
             )
             scoped_rows[scope].append(row)
 
-        work_units: list[str] = []
+        work_units: list[WorkUnitSummary] = []
         owned_ids: list[str] = []
         for scope in WORK_UNIT_SCOPES:
             module_rows = [
@@ -782,7 +857,13 @@ def main() -> int:
                         design_modules=design_modules,
                         tree=tree,
                     )
-                    work_units.append(unit_id)
+                    work_units.append(
+                        summarize_work_unit(
+                            unit_id,
+                            scope,
+                            group,
+                        )
+                    )
                     owned_ids.extend(row["vio_id"] for row in group.rows)
 
         target_ids = {row["vio_id"] for row in rows}
@@ -799,7 +880,7 @@ def main() -> int:
         manifest = {
             "schema_version": SLICE_SCHEMA_VERSION,
             "hierarchy_available": tree is not None,
-            "work_units": work_units,
+            "analysis_batches": build_analysis_batches(work_units),
         }
         (temp_output / "manifest.json").write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
@@ -814,6 +895,7 @@ def main() -> int:
 
     print(f"SLICES_DIR={output}")
     print(f"WORK_UNITS={len(work_units)}")
+    print(f"ANALYSIS_BATCHES={len(manifest['analysis_batches'])}")
     print(f"LINT_ENTRIES={len(rows)}")
     return 0
 
