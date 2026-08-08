@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from _contract import (
+    HDL_IDENTIFIER_RE,
     IN_HIERARCHY_STATUS,
     INSTANCE_WORK_UNIT_KIND,
     ISOLATED_SCOPE,
@@ -80,6 +81,7 @@ class WorkUnitSummary:
 def parse_tree(path: Path) -> TreeInfo:
     modules: set[str] = set()
     path_to_module: dict[str, str] = {}
+    seen_paths: set[str] = set()
     instance_stack: list[str] = []
     top_module = ""
     root_instance = ""
@@ -93,6 +95,9 @@ def parse_tree(path: Path) -> TreeInfo:
         instance, module = (value.strip() for value in label.split(" : ", 1))
         if not instance or not module:
             raise ValueError(f"{path}:{line_number}: malformed hierarchy line")
+        unresolved = module.endswith(" [unresolved]")
+        if unresolved:
+            module = module.removesuffix(" [unresolved]")
 
         depth = branch_position // 4 + 1 if branch_position >= 0 else 0
         if depth > len(instance_stack):
@@ -100,10 +105,13 @@ def parse_tree(path: Path) -> TreeInfo:
         del instance_stack[depth:]
         instance_stack.append(instance)
         hierarchy_path = ".".join(instance_stack)
-        if hierarchy_path in path_to_module:
+        if hierarchy_path in seen_paths:
             raise ValueError(
                 f"{path}:{line_number}: duplicate hierarchy path {hierarchy_path}"
             )
+        seen_paths.add(hierarchy_path)
+        if unresolved:
+            continue
         path_to_module[hierarchy_path] = module
         modules.add(module)
         if depth == 0:
@@ -124,7 +132,7 @@ def parse_tree(path: Path) -> TreeInfo:
 def read_policy(
     path: Path,
     active_modules: set[str],
-    top_module: str | None,
+    top_module: str,
 ) -> dict[str, list[str]]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -158,7 +166,7 @@ def read_policy(
         )
     if len(levels["level4"]) != 1:
         raise PolicyValidationError("level4 must contain exactly one top module")
-    if top_module is not None and levels["level4"] != [top_module]:
+    if levels["level4"] != [top_module]:
         raise PolicyValidationError(f"level4 must contain only top module {top_module}")
     return levels
 
@@ -336,7 +344,7 @@ class DependencyResolver:
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.source_order = [
             self._relative(path)
-            for path in self.inputs.files
+            for path in self.inputs.source_files()
             if self._is_inside(path)
         ]
         self.include_dirs = [
@@ -402,7 +410,7 @@ class DependencyResolver:
         log_path = self.work_dir / f"{digest}.log"
         command = ["read_verilog", "-sv", "-ppdump"]
         for directory in self.include_dirs:
-            command.extend(["-I", quote_filelist_path(str(directory))])
+            command.append(f"-I{directory.as_posix()}")
         command.extend(f"-D{define}" for define in self.inputs.defines)
         command.append(quote_filelist_path(str(source)))
         script_path.write_text(" ".join(command) + "\n", encoding="utf-8")
@@ -764,6 +772,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-dir", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--policy", type=Path, required=True)
+    parser.add_argument("--top", required=True)
     parser.add_argument("--module-only", action="store_true")
     parser.add_argument("--yosys", type=Path)
     return parser.parse_args()
@@ -788,11 +797,18 @@ def main() -> int:
             raise FileNotFoundError(path)
 
     design_modules = read_design_metadata(metadata_path, rtl_dir)
+    if not HDL_IDENTIFIER_RE.fullmatch(args.top):
+        raise ValueError(f"unsupported top module identifier: {args.top!r}")
+    if args.top not in design_modules:
+        raise ValueError(f"top module is absent from design metadata: {args.top}")
     tree = None if args.module_only else parse_tree(tree_path)
+    if tree is not None and tree.top_module != args.top:
+        raise ValueError(
+            f"hierarchy top {tree.top_module} does not match requested top {args.top}"
+        )
     active_modules = set(design_modules) if tree is None else tree.modules
-    top_module = None if tree is None else tree.top_module
     path_to_module = {} if tree is None else tree.path_to_module
-    levels = read_policy(args.policy, active_modules, top_module)
+    levels = read_policy(args.policy, active_modules, args.top)
     rows = read_lint(
         lint_path,
         active_modules,

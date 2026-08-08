@@ -14,7 +14,7 @@
 
 - `langgraph.json` 只声明通用对话 graph `lint`。
 - `lint_agent_graph(runtime)` 是异步 context manager，返回由 DeepAgents `create_deep_agent` 创建的通用 agent graph，并提供原生工具 `run_lint_root_cause_workflow`。
-- 原生工具内部运行三阶段 `StateGraph`：输入转换、四级切片、统一跨层根因分析；内部智能体只接收基础工具，不会递归调用根因工作流工具。
+- 原生工具内部运行三阶段 `StateGraph`：输入转换与层次恢复、四级切片、统一跨层根因分析；内部智能体只接收基础工具，不会递归调用根因工作流工具。
 - LangGraph Server 负责 HTTP API、thread、run、store 的服务端管理；本项目在 graph factory 中读取 `runtime.store` 并注入给 agent。
 - 主 agent 共享根目录的运行时模块：`agent_runtime/`、`memory/`、`rag/`、`llm/`、`compat/`。
 - MCP 工具通过 stdio 子进程加载，启动方式是 `python -m mcp_server.server`。
@@ -53,8 +53,8 @@ mcp_server/
 memory/
   long_term.py                      # 用户 profile 和长期记忆工具
 lint_root_cause_workflow/
-  state.py                          # 两输入、路径状态和单输出契约
-  nodes.py                          # 三个业务节点
+  state.py                          # 源码、lint CSV、顶层模块输入及单输出契约
+  nodes.py                          # 各阶段业务节点
   graph.py                          # 固定 StateGraph 组装
 ```
 

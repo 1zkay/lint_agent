@@ -13,6 +13,7 @@ from agent_runtime.middleware import create_lint_deep_agent
 from lint_root_cause_workflow import build_workflow
 from lint_root_cause_workflow.prompts import (
     CLASSIFIER_SYSTEM_PROMPT,
+    FILELIST_RESOLVER_SYSTEM_PROMPT,
     ROOT_CAUSE_ANALYSIS_BATCH_SYSTEM_PROMPT,
     ROOT_CAUSE_GLOBAL_MERGE_SYSTEM_PROMPT,
     ROOT_CAUSE_JUDGE_SYSTEM_PROMPT,
@@ -34,6 +35,18 @@ def build_root_cause_workflow(
 ) -> Any:
     """Build the compiled workflow with agents limited to the base tool set."""
 
+    filelist_agent, _, _ = create_lint_deep_agent(
+        llm,
+        base_tools,
+        root_dir=root_dir,
+        log_prefix=f"{log_prefix}:filelist_resolver",
+        system_prompt=FILELIST_RESOLVER_SYSTEM_PROMPT,
+        store=store,
+        context_schema=AgentContext,
+        name="lint_yosys_filelist_resolver",
+        tool_retry_tools=base_tools,
+        model_retry_on_failure="error",
+    )
     classifier_agent, _, _ = create_lint_deep_agent(
         llm,
         base_tools,
@@ -83,6 +96,7 @@ def build_root_cause_workflow(
         model_retry_on_failure="error",
     )
     return build_workflow(
+        filelist_agent=filelist_agent,
         classifier_agent=classifier_agent,
         analysis_batch_agent=analysis_batch_agent,
         merge_agent=merge_agent,
@@ -110,13 +124,15 @@ def build_root_cause_workflow_tool(
         description=(
             "Run the complete Verilog lint root-cause workflow when the user "
             "provides a source archive or source directory and its corresponding "
-            "lint CSV. Use it for full report generation, not for general questions."
+            "lint CSV plus the exact top module. Use it for full report generation, "
+            "not for general questions."
         ),
         response_format="content_and_artifact",
     )
     async def run_lint_root_cause_workflow(
         source_path: str,
         lint_csv_path: str,
+        top_module: str,
         runtime: ToolRuntime[AgentContext],
     ) -> tuple[dict[str, str], dict[str, str]]:
         workflow = build_root_cause_workflow(
@@ -134,6 +150,7 @@ def build_root_cause_workflow_tool(
             {
                 "source_path": source_path,
                 "lint_csv_path": lint_csv_path,
+                "top_module": top_module,
             },
             config=runtime.config,
             context=runtime.context or AgentContext(),

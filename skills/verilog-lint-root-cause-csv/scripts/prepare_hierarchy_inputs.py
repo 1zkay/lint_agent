@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -15,6 +16,11 @@ import zipfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from _contract import (
+    FILELIST_RECOVERY_EXIT_CODE,
+    hierarchy_module_status,
+    validate_hierarchy_status,
+)
 from _filelist import (
     FilelistInputs,
     HEADER_SUFFIXES,
@@ -22,7 +28,7 @@ from _filelist import (
     choose_filelist,
     parse_filelist,
     quote_filelist_path,
-    unique_paths,
+    render_filelist,
 )
 
 
@@ -181,7 +187,11 @@ def _copy_source_tree(
     shutil.copytree(source, target, dirs_exist_ok=True, ignore=ignore)
 
 
-def _write_generated_filelist(rtl_dir: Path, filelist_path: Path) -> None:
+def _write_generated_filelist(
+    rtl_dir: Path,
+    filelist_path: Path,
+    top: str,
+) -> None:
     source_files = sorted(
         path
         for path in rtl_dir.rglob("*")
@@ -200,6 +210,7 @@ def _write_generated_filelist(rtl_dir: Path, filelist_path: Path) -> None:
         f"-I {quote_filelist_path(path.relative_to(filelist_path.parent).as_posix())}"
         for path in include_dirs
     ]
+    lines.append(f"--top {quote_filelist_path(top)}")
     lines.extend(
         quote_filelist_path(path.relative_to(filelist_path.parent).as_posix())
         for path in source_files
@@ -212,6 +223,7 @@ def _write_staged_filelist(
     source_root: Path,
     rtl_dir: Path,
     filelist_path: Path,
+    top: str,
 ) -> None:
     source_root = source_root.resolve()
 
@@ -225,31 +237,27 @@ def _write_staged_filelist(
             raise FileNotFoundError(f"staged filelist {kind} not found: {staged}")
         return staged
 
-    include_dirs = [
-        staged_path(path, "include directory")
-        for path in unique_paths([*inputs.incdirs, *inputs.filelist_dirs])
-    ]
-    source_files = [staged_path(path, "source") for path in inputs.files]
-    if not source_files:
+    if not inputs.source_files():
         raise FileNotFoundError(f"no Verilog sources found in {source_root}")
-    lines = [
-        f"-I {quote_filelist_path(path.relative_to(filelist_path.parent).as_posix())}"
-        for path in include_dirs
-    ]
-    lines.extend(f"-D {quote_filelist_path(define)}" for define in inputs.defines)
-    if inputs.top:
-        lines.append(f"-top {quote_filelist_path(inputs.top)}")
-    lines.extend(
-        quote_filelist_path(path.relative_to(filelist_path.parent).as_posix())
-        for path in source_files
+
+    def staged_text(path: Path) -> str:
+        staged = staged_path(path, "path")
+        return staged.relative_to(filelist_path.parent).as_posix()
+
+    filelist_path.write_text(
+        render_filelist(inputs, staged_text, top=top),
+        encoding="utf-8",
     )
-    filelist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def stage_source(source: Path, run_dir: Path, *, unwrap_wrapper: bool = False) -> None:
+def stage_source(
+    source: Path,
+    run_dir: Path,
+    top: str,
+    *,
+    unwrap_wrapper: bool = False,
+) -> bool:
     source_root = _unwrap_source_root(source) if unwrap_wrapper else source
-    source_filelist = choose_filelist(source_root)
-    filelist_inputs = parse_filelist(source_filelist) if source_filelist else None
     rtl_dir = run_dir / "rtl"
     generated_outputs = (
         {"slices", "work"}
@@ -263,15 +271,40 @@ def stage_source(source: Path, run_dir: Path, *, unwrap_wrapper: bool = False) -
         ignored_top_level=generated_outputs,
     )
     filelist_path = run_dir / "filelist.f"
-    if filelist_inputs is not None:
+    try:
+        source_filelist = choose_filelist(source_root)
+        if source_filelist is None:
+            _write_generated_filelist(rtl_dir, filelist_path, top)
+            return False
+        filelist_inputs = parse_filelist(
+            source_filelist,
+            working_dir=source_root,
+        )
         _write_staged_filelist(
             filelist_inputs,
             source_root,
             rtl_dir,
             filelist_path,
+            top,
         )
-    else:
-        _write_generated_filelist(rtl_dir, filelist_path)
+        return True
+    except (FileNotFoundError, ValueError) as exc:
+        print(
+            f"warning: project filelist is unusable; generated one instead: {exc}",
+            file=sys.stderr,
+        )
+        _write_generated_filelist(rtl_dir, filelist_path, top)
+        return False
+
+
+def _run_mapper(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
 
 
 def create_run_directory(project_name: str) -> tuple[Path, str]:
@@ -295,7 +328,7 @@ def parse_args() -> argparse.Namespace:
     source.add_argument("--source-archive", type=Path)
     source.add_argument("--source-dir", type=Path)
     parser.add_argument("--lint-report", type=Path, required=True)
-    parser.add_argument("--top")
+    parser.add_argument("--top", required=True)
     return parser.parse_args()
 
 
@@ -320,9 +353,18 @@ def main() -> int:
         if args.source_archive:
             extracted.mkdir()
             safe_extract(source_input, extracted)
-            stage_source(extracted, run_dir, unwrap_wrapper=True)
+            used_project_filelist = stage_source(
+                extracted,
+                run_dir,
+                args.top,
+                unwrap_wrapper=True,
+            )
         else:
-            stage_source(source_input, run_dir)
+            used_project_filelist = stage_source(
+                source_input,
+                run_dir,
+                args.top,
+            )
 
         command = [
             sys.executable,
@@ -334,21 +376,52 @@ def main() -> int:
             "--out-dir",
             str(work_dir),
             "--keep-work",
+            "--top",
+            args.top,
         ]
-        if args.top:
-            command.extend(["--top", args.top])
-        result = subprocess.run(
-            command,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if result.returncode:
+        result = _run_mapper(command)
+        if (
+            result.returncode == FILELIST_RECOVERY_EXIT_CODE
+            and used_project_filelist
+        ):
+            print(
+                "warning: project filelist could not produce analysis inputs; "
+                "retrying with a generated filelist",
+                file=sys.stderr,
+            )
+            _write_generated_filelist(
+                run_dir / "rtl",
+                run_dir / "filelist.f",
+                args.top,
+            )
+            result = _run_mapper(command)
+        if result.returncode == FILELIST_RECOVERY_EXIT_CODE:
+            reason = (
+                result.stderr.strip() or "filelist recovery is required"
+            )[-4000:]
+            work_dir.mkdir(parents=True, exist_ok=True)
+            (work_dir / "hierarchy_tree.txt").unlink(missing_ok=True)
+            (work_dir / "lint_entries_mapped.csv").unlink(missing_ok=True)
+            (work_dir / "design_metadata.json").unlink(missing_ok=True)
+            (work_dir / "hierarchy_status.json").write_text(
+                json.dumps(
+                    hierarchy_module_status(reason),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        elif result.returncode:
             raise RuntimeError(f"hierarchy mapper failed:\n{result.stderr[-2000:]}")
-        if not (work_dir / "hierarchy_status.json").is_file():
+        hierarchy_status_path = work_dir / "hierarchy_status.json"
+        if not hierarchy_status_path.is_file():
             raise RuntimeError("hierarchy mapper did not create hierarchy_status.json")
-        shutil.rmtree(work_dir / "_work", ignore_errors=True)
+        hierarchy_status = validate_hierarchy_status(
+            json.loads(hierarchy_status_path.read_text(encoding="utf-8"))
+        )
+        if hierarchy_status.get("mode") == "hierarchy":
+            shutil.rmtree(work_dir / "_work", ignore_errors=True)
         if extracted.exists():
             shutil.rmtree(extracted)
     except Exception as exc:

@@ -36,6 +36,7 @@ show_usage() {
   printf '\n'
   printf '源码输入:\n'
   printf '  同名源码目录，或同名 .tar/.tar.gz/.tgz/.tar.bz2/.tbz2/.tar.xz/.txz/.zip/.7z/.rar/.cab 源码包。\n'
+  printf '  提交前会逐项询问顶层模块名。\n'
   printf '输出:\n'
   printf '  reports/<项目名>_root_cause_<YYYYMMDD_HHMMSS>.csv，项目名来自同名 lint CSV 文件名。\n'
   printf '\n'
@@ -645,6 +646,7 @@ start_job() {
   local csv_path="${csv_paths[index]}"
   local source_path="${source_paths[index]}"
   local stem="${stems[index]}"
+  local top_module="${top_modules[index]}"
   local thread_id
   local input_message_id
   local response_file
@@ -659,12 +661,13 @@ start_job() {
   response_file="$log_dir/${stem}.${thread_id}.response.json"
   request_file="$log_dir/${stem}.${thread_id}.request.json"
   status_file="$log_dir/${stem}.${thread_id}.status"
-  prompt="${csv_path} 为 lint 报告路径，${source_path} 为 Verilog 源代码包或源码目录路径，运行根因分析工作流，生成根因分析 CSV。"
+  prompt="${csv_path} 为 lint 报告路径，${source_path} 为 Verilog 源代码包或源码目录路径，顶层模块为 ${top_module}，运行根因分析工作流，生成根因分析 CSV。"
 
   printf '\n[%s/%s] %s\n' "$((index + 1))" "$task_count" "$stem"
   printf 'thread_id: %s\n' "$thread_id"
   printf 'lint: %s\n' "$(display_path "$csv_path")"
   printf 'source: %s\n' "$(display_path "$source_path")"
+  printf 'top: %s\n' "$top_module"
 
   thread_body="$(build_thread_json "$thread_id" "$user_id" "$authenticated")"
   if ! post_json "/threads" "$thread_body" 30 >/dev/null; then
@@ -828,6 +831,19 @@ printf '智能体版本: %s\n' "$AGENT_DISPLAY_VERSION"
 printf '并发任务数: %s\n' "$batch_jobs"
 printf 'Agent Server: %s\n' "$LANGGRAPH_URL"
 curl -fsS --max-time 3 "${LANGGRAPH_URL%/}/ok" >/dev/null || die "Agent Server is not reachable at $LANGGRAPH_URL."
+
+top_modules=()
+for index in "${!stems[@]}"; do
+  while true; do
+    printf '请输入项目 %s 的顶层模块名: ' "${stems[index]}"
+    IFS= read -r top_module || die "failed to read top module."
+    if [[ "$top_module" =~ ^[A-Za-z_][A-Za-z0-9_$]*$ ]]; then
+      top_modules+=("$top_module")
+      break
+    fi
+    warn "顶层模块名必须是普通 Verilog 标识符。"
+  done
+done
 
 if [[ -n "${LANGGRAPH_USER_ID:-}" ]]; then
   user_id="$LANGGRAPH_USER_ID"

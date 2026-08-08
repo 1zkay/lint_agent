@@ -19,13 +19,24 @@ from pathlib import Path
 from typing import Iterable
 
 from _contract import (
+    FILELIST_RECOVERY_EXIT_CODE,
+    HDL_IDENTIFIER_RE,
+    HIERARCHY_ATTEMPTS,
     IN_HIERARCHY_STATUS,
     MAPPED_LINT_COLUMNS,
     MODULE_SCOPE_STATUS,
     STANDALONE_STATUS,
     format_violation_id,
+    hierarchy_module_status,
+    hierarchy_tree_status,
 )
-from _filelist import SOURCE_SUFFIXES, choose_filelist, parse_filelist, unique_paths
+from _filelist import (
+    SOURCE_SUFFIXES,
+    FilelistInputs,
+    choose_filelist,
+    parse_filelist,
+    render_filelist,
+)
 
 LINT_AGENT_ROOT = Path(__file__).resolve().parents[3]
 if str(LINT_AGENT_ROOT) not in sys.path:
@@ -87,6 +98,7 @@ type ModuleRangeIndex = dict[str, tuple[FileModuleRangeIndex, ...]]
 class CellNode:
     path: tuple[str, ...]
     display_type: str
+    unresolved: bool = False
     children: list["CellNode"] = field(default_factory=list)
 
     @property
@@ -107,6 +119,17 @@ class MappedLint:
     contents: str
 
 
+@dataclass(frozen=True)
+class HierarchyRun:
+    json_path: Path
+    frontend: str
+    completeness: str
+
+
+class FilelistRecoveryError(ValueError):
+    """Report an input-selection error that a corrected filelist may resolve."""
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -116,7 +139,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--csv", type=Path, required=True, help="Lint report CSV path.")
     parser.add_argument("--source", type=Path, required=True, help="Staged project directory.")
-    parser.add_argument("--top", help="Top module. Defaults to Yosys hierarchy -auto-top.")
+    parser.add_argument("--top", required=True, help="Top module.")
+    hierarchy_output = parser.add_mutually_exclusive_group()
+    hierarchy_output.add_argument(
+        "--require-hierarchy",
+        action="store_true",
+        help="Return an error instead of writing module-level fallback outputs.",
+    )
+    hierarchy_output.add_argument(
+        "--module-only",
+        metavar="REASON",
+        help="Skip Yosys and write module-level outputs with this reason.",
+    )
     parser.add_argument("--out-dir", type=Path, required=True, help="Output directory.")
     parser.add_argument("--yosys", type=Path, help="Explicit Yosys executable.")
     parser.add_argument(
@@ -157,29 +191,20 @@ def copy_runtime_data_files(source_root: Path, work_root: Path) -> None:
 
 def collect_verilog_inputs(
     source_root: Path,
-) -> tuple[list[Path], list[Path], list[str], str | None]:
+) -> tuple[FilelistInputs, list[Path]]:
     analysis_root = (source_root / "rtl").resolve()
     filelist = choose_filelist(source_root)
     if filelist:
-        parsed = parse_filelist(filelist)
-        files = parsed.files
-        filelist_dirs = [
-            path
-            for path in parsed.filelist_dirs
-            if path == analysis_root or analysis_root in path.parents
-        ]
-        incdirs = [*parsed.incdirs, *filelist_dirs]
-        defines = parsed.defines
-        filelist_top = parsed.top
+        inputs = parse_filelist(filelist, working_dir=source_root)
     else:
-        files = unique_paths(
-            p
-            for p in source_root.rglob("*")
-            if p.is_file() and p.suffix.lower() in SOURCE_SUFFIXES
+        inputs = FilelistInputs(
+            files=sorted(
+                p.resolve()
+                for p in source_root.rglob("*")
+                if p.is_file() and p.suffix.lower() in SOURCE_SUFFIXES
+            )
         )
-        incdirs = []
-        defines = []
-        filelist_top = None
+    files = inputs.source_files()
 
     if not files:
         raise FileNotFoundError(f"No Verilog source files found under {source_root}")
@@ -191,16 +216,15 @@ def collect_verilog_inputs(
             raise ValueError(
                 f"filelist source is outside staged rtl/: {source_file}"
             ) from exc
-    for incdir in incdirs:
+    for directory in [*inputs.incdirs, *inputs.library_dirs]:
         try:
-            incdir.relative_to(analysis_root)
+            directory.relative_to(analysis_root)
         except ValueError as exc:
             raise ValueError(
-                f"filelist include directory is outside staged rtl/: {incdir}"
+                f"filelist directory is outside staged rtl/: {directory}"
             ) from exc
 
-    incdirs = unique_paths([*incdirs, *(path.parent for path in files)])
-    return files, incdirs, defines, filelist_top
+    return inputs, files
 
 
 def yosys_quote(value: str | Path) -> str:
@@ -210,38 +234,49 @@ def yosys_quote(value: str | Path) -> str:
 
 def run_yosys(
     yosys: YosysLocation,
-    files: list[Path],
-    incdirs: list[Path],
-    defines: list[str],
-    top: str | None,
+    inputs: FilelistInputs,
+    top: str,
     work_root: Path,
-) -> tuple[Path, Path]:
-    all_modules_path = work_root / "all_modules.json"
+) -> HierarchyRun:
     hierarchy_path = work_root / "hierarchy.json"
-    script_path = work_root / "hierarchy.ys"
     build_dir = work_root / "build"
     build_dir.mkdir(parents=True, exist_ok=True)
-    has_sv = any(p.suffix.lower() == ".sv" for p in files)
+    files = [*inputs.library_files, *inputs.files]
+    has_sv = (
+        inputs.language_standard == "latest"
+        or bool(
+            inputs.language_standard
+            and inputs.language_standard.startswith("1800-")
+        )
+        or any(
+            path.suffix.lower() in {".sv", ".svh"}
+            for path in inputs.source_files()
+        )
+    )
 
-    cmd_parts = ["read_verilog"]
+    defaults = ["verilog_defaults", "-add"]
     if has_sv:
-        cmd_parts.append("-sv")
-    for incdir in incdirs:
-        cmd_parts.extend(["-I", yosys_quote(incdir)])
-    for define in defines:
-        cmd_parts.append("-D" + define)
-    cmd_parts.extend(yosys_quote(path) for path in files)
+        defaults.append("-sv")
+    defaults.extend(f"-I{path.as_posix()}" for path in inputs.incdirs)
+    defaults.extend(f"-D{define}" for define in inputs.defines)
 
-    hierarchy_cmd = f"hierarchy -check -top {top}" if top else "hierarchy -check -auto-top"
+    read_commands: list[list[str]] = []
+    if len(defaults) > 2:
+        read_commands.append(defaults)
+    if files:
+        read_commands.append(
+            ["read_verilog", "-defer", *(yosys_quote(path) for path in files)]
+        )
 
-    def write_script(path: Path, read_command: list[str]) -> None:
-        # hierarchy may derive new parameterized modules after the first proc pass.
+    def write_script(
+        path: Path,
+        commands: list[list[str]],
+        hierarchy_command: str,
+    ) -> None:
         script = "\n".join(
             [
-                " ".join(read_command),
-                "proc",
-                f"write_json {yosys_quote(all_modules_path)}",
-                hierarchy_cmd,
+                *(" ".join(command) for command in commands),
+                hierarchy_command,
                 "proc",
                 f"write_json {yosys_quote(hierarchy_path)}",
                 "",
@@ -261,60 +296,67 @@ def run_yosys(
             check=False,
         )
 
-    write_script(script_path, cmd_parts)
-    result = execute(script_path)
-    fallback_script_path: Path | None = None
-    if result.returncode != 0:
-        (work_root / "yosys.read_verilog.stdout.log").write_text(
-            result.stdout,
-            encoding="utf-8",
-            errors="replace",
-        )
-        (work_root / "yosys.read_verilog.stderr.log").write_text(
-            result.stderr,
-            encoding="utf-8",
-            errors="replace",
-        )
-        slang_filelist_path = work_root / "hierarchy.slang.f"
-        slang_filelist_parts: list[str] = []
-        for incdir in incdirs:
-            slang_filelist_parts.extend(["-I", yosys_quote(incdir)])
-        for define in defines:
-            slang_filelist_parts.extend(["-D", yosys_quote(define)])
-        slang_filelist_parts.extend(yosys_quote(path) for path in files)
-        slang_filelist_path.write_text(
-            "\n".join(slang_filelist_parts) + "\n",
-            encoding="utf-8",
-        )
-        fallback_script_path = work_root / "hierarchy.slang.ys"
-        write_script(
-            fallback_script_path,
-            ["read_slang", "--keep-hierarchy", "-f", "../hierarchy.slang.f"],
-        )
-        result = execute(fallback_script_path)
+    slang_filelist_path = work_root / "hierarchy.slang.f"
+    failures: list[str] = []
+    for selected_frontend, completeness in HIERARCHY_ATTEMPTS:
+        hierarchy_path.unlink(missing_ok=True)
+        hierarchy_parts = [
+            "hierarchy",
+            *(["-check"] if completeness == "complete" else []),
+            "-top",
+            top,
+        ]
+        if selected_frontend == "read_verilog":
+            for library_dir in inputs.library_dirs:
+                hierarchy_parts.extend(["-libdir", library_dir.as_posix()])
+            script_path = work_root / f"hierarchy.read_verilog.{completeness}.ys"
+            commands = read_commands
+        else:
+            if not slang_filelist_path.exists():
+                slang_filelist_path.write_text(
+                    render_filelist(inputs, lambda path: str(path), top=top),
+                    encoding="utf-8",
+                )
+            script_path = work_root / f"hierarchy.read_slang.{completeness}.ys"
+            commands = [
+                [
+                    "read_slang",
+                    "--keep-hierarchy",
+                    "-F",
+                    slang_filelist_path.as_posix(),
+                ]
+            ]
+        write_script(script_path, commands, " ".join(hierarchy_parts))
 
-    (work_root / "yosys.stdout.log").write_text(result.stdout, encoding="utf-8", errors="replace")
-    (work_root / "yosys.stderr.log").write_text(result.stderr, encoding="utf-8", errors="replace")
-    if result.returncode != 0:
-        if fallback_script_path:
-            raise RuntimeError(
-                "Yosys failed after Slang frontend fallback. See logs:\n"
-                f"  read_verilog script: {script_path}\n"
-                f"  read_verilog stdout: {work_root / 'yosys.read_verilog.stdout.log'}\n"
-                f"  read_verilog stderr: {work_root / 'yosys.read_verilog.stderr.log'}\n"
-                f"  read_slang script: {fallback_script_path}\n"
-                f"  read_slang stdout: {work_root / 'yosys.stdout.log'}\n"
-                f"  read_slang stderr: {work_root / 'yosys.stderr.log'}\n"
-                f"read_slang stderr tail:\n{result.stderr[-2000:]}"
+        result = execute(script_path)
+        for stream, contents in (
+            ("stdout", result.stdout),
+            ("stderr", result.stderr),
+        ):
+            (
+                work_root
+                / f"yosys.{selected_frontend}.{completeness}.{stream}.log"
+            ).write_text(
+                contents,
+                encoding="utf-8",
+                errors="replace",
             )
-        raise RuntimeError(
-            "Yosys failed. See logs:\n"
-            f"  script: {script_path}\n"
-            f"  stdout: {work_root / 'yosys.stdout.log'}\n"
-            f"  stderr: {work_root / 'yosys.stderr.log'}\n"
-            f"stderr tail:\n{result.stderr[-2000:]}"
+        if result.returncode == 0 and hierarchy_path.is_file():
+            return HierarchyRun(
+                json_path=hierarchy_path,
+                frontend=selected_frontend,
+                completeness=completeness,
+            )
+        failures.append(
+            f"{selected_frontend} + {completeness} script: {script_path}\n"
+            f"{selected_frontend} + {completeness} stderr tail:\n"
+            f"{result.stderr[-2000:]}"
         )
-    return hierarchy_path, all_modules_path
+
+    raise RuntimeError(
+        "Yosys hierarchy generation failed. See attempt-specific logs:\n"
+        + "\n".join(failures)
+    )
 
 
 def module_display_name(
@@ -367,7 +409,7 @@ def find_top_module(modules: dict[str, dict]) -> str:
 def build_hierarchy(
     json_path: Path,
     source_modules: set[str],
-) -> tuple[CellNode, dict[str, list[str]]]:
+) -> tuple[CellNode, dict[str, list[str]], dict[str, int]]:
     data = json.loads(json_path.read_text(encoding="utf-8"))
     modules: dict[str, dict] = data["modules"]
     module_names = set(modules)
@@ -379,6 +421,7 @@ def build_hierarchy(
     top_display = display_by_internal[top_internal]
 
     module_to_paths: dict[str, list[str]] = defaultdict(list)
+    unresolved_modules: dict[str, int] = defaultdict(int)
 
     def make_node(internal: str, path: tuple[str, ...]) -> CellNode:
         display_type = display_by_internal[internal]
@@ -390,26 +433,42 @@ def build_hierarchy(
         module_to_paths[display_type].append(path_text)
 
         cells = modules[internal].get("cells", {})
-        child_items = [
-            (src_line(cell), cell_name, cell)
-            for cell_name, cell in cells.items()
-            if cell.get("type") in module_names
-        ]
-        for _, cell_name, cell in sorted(child_items, key=lambda item: (item[0], item[1])):
+        child_items = sorted(
+            (
+                (src_line(cell), cell_name, cell)
+                for cell_name, cell in cells.items()
+                if cell.get("type") in module_names
+                or (
+                    str(cell.get("type", ""))
+                    and not str(cell.get("type", "")).startswith("$")
+                )
+            ),
+            key=lambda item: (item[0], item[1]),
+        )
+        for _, cell_name, cell in child_items:
             child_internal = cell["type"]
-            child = make_node(child_internal, (*path, cell_name))
+            if child_internal in module_names:
+                child = make_node(child_internal, (*path, cell_name))
+            else:
+                unresolved_modules[child_internal] += 1
+                child = CellNode(
+                    path=(*path, cell_name),
+                    display_type=child_internal,
+                    unresolved=True,
+                )
             node.children.append(child)
         return node
 
     root = make_node(top_internal, (top_display,))
-    return root, dict(module_to_paths)
+    return root, dict(module_to_paths), dict(unresolved_modules)
 
 
 def render_tree(root: CellNode) -> str:
     lines: list[str] = []
 
     def label(node: CellNode) -> str:
-        return f"{node.path[-1]} : {node.display_type}"
+        suffix = " [unresolved]" if node.unresolved else ""
+        return f"{node.path[-1]} : {node.display_type}{suffix}"
 
     lines.append(label(root))
 
@@ -627,7 +686,7 @@ def locate_module_for_line(
 
     if len(candidate_files) > 1:
         candidates = ", ".join(item.file.as_posix() for item in candidate_files)
-        raise ValueError(
+        raise FilelistRecoveryError(
             f"ambiguous lint source path {lint_path!r} at line {line}: {candidates}"
         )
 
@@ -642,7 +701,6 @@ def locate_module_for_line(
 def parse_lint_csv(
     csv_path: Path,
     ranges: list[ModuleRange],
-    module_to_paths: dict[str, list[str]] | None,
 ) -> list[MappedLint]:
     mapped: list[MappedLint] = []
     range_index = build_module_range_index(ranges)
@@ -696,24 +754,12 @@ def parse_lint_csv(
                 )
             located = locate_module_for_line(range_index, source_path, source_line)
             if located is None:
-                raise ValueError(
+                raise FilelistRecoveryError(
                     f"{csv_path}:{row_index + 1}: cannot map "
                     f"{source_path}({source_line}) to a source module"
                 )
             source_file = located.analysis_file
             source_module = located.module
-
-            if module_to_paths is None:
-                hierarchy_paths = []
-                status = MODULE_SCOPE_STATUS
-            else:
-                candidate_paths = module_to_paths.get(source_module, [])
-                status = (
-                    IN_HIERARCHY_STATUS
-                    if candidate_paths
-                    else STANDALONE_STATUS
-                )
-                hierarchy_paths = reported_hierarchy_paths(contents, candidate_paths)
 
             mapped.append(
                 MappedLint(
@@ -723,12 +769,27 @@ def parse_lint_csv(
                     source_file=source_file,
                     source_line=source_line,
                     source_module=source_module,
-                    hierarchy_paths=hierarchy_paths,
-                    status=status,
+                    hierarchy_paths=[],
+                    status=MODULE_SCOPE_STATUS,
                     contents=contents,
                 )
             )
     return mapped
+
+
+def apply_hierarchy_mapping(
+    mapped: list[MappedLint],
+    module_to_paths: dict[str, list[str]],
+) -> None:
+    for item in mapped:
+        candidate_paths = module_to_paths.get(item.source_module, [])
+        item.status = (
+            IN_HIERARCHY_STATUS if candidate_paths else STANDALONE_STATUS
+        )
+        item.hierarchy_paths = reported_hierarchy_paths(
+            item.contents,
+            candidate_paths,
+        )
 
 
 def source_files_by_module(ranges: list[ModuleRange]) -> dict[str, list[str]]:
@@ -767,42 +828,35 @@ def build_design_metadata(
         internal: module_display_name(internal, module, source_modules)
         for internal, module in yosys_modules.items()
     }
-    source_files = source_files_by_module(ranges)
-    duplicate_sources = {
-        module: files for module, files in source_files.items() if len(files) > 1
-    }
-    if duplicate_sources:
-        raise ValueError(
-            f"Modules are defined in multiple source files: {duplicate_sources}"
-        )
-    source_by_module = {
-        module: files[0] for module, files in source_files.items()
-    }
-
-    modules: dict[str, dict] = {}
+    modules = build_source_metadata(ranges)["modules"]
+    enriched: set[str] = set()
     for internal, module in yosys_modules.items():
         display = display_by_internal[internal]
-        if display not in source_by_module or display in modules:
+        if display not in modules or display in enriched:
             continue
         children = []
         for instance, cell in module.get("cells", {}).items():
             child_type = cell.get("type", "")
             child = display_by_internal.get(child_type, child_type)
-            if child in source_by_module:
+            if child in modules:
                 children.append({"instance": instance, "module": child})
-        modules[display] = {
-            "source_file": source_by_module[display],
-            "parameters": module.get("parameter_default_values", {}),
-            "ports": [
-                {
-                    "name": name,
-                    "direction": port["direction"],
-                    "width": len(port.get("bits", [])),
-                }
-                for name, port in module.get("ports", {}).items()
-            ],
-            "child_instances": sorted(children, key=lambda item: item["instance"]),
-        }
+        modules[display].update(
+            {
+                "parameters": module.get("parameter_default_values", {}),
+                "ports": [
+                    {
+                        "name": name,
+                        "direction": port["direction"],
+                        "width": len(port.get("bits", [])),
+                    }
+                    for name, port in module.get("ports", {}).items()
+                ],
+                "child_instances": sorted(
+                    children, key=lambda item: item["instance"]
+                ),
+            }
+        )
+        enriched.add(display)
     return {"schema_version": 1, "modules": modules}
 
 
@@ -812,6 +866,8 @@ def write_outputs(
     mapped: list[MappedLint],
     design_metadata: dict,
     hierarchy_error: str | None,
+    hierarchy_run: HierarchyRun | None,
+    unresolved_modules: dict[str, int],
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     tree_path = out_dir / "hierarchy_tree.txt"
@@ -845,12 +901,19 @@ def write_outputs(
         encoding="utf-8",
     )
 
-    status = {
-        "schema_version": 1,
-        "mode": "hierarchy" if root is not None else "module",
-    }
-    if hierarchy_error:
-        status["reason"] = hierarchy_error[-4000:]
+    if root is None:
+        status = hierarchy_module_status(
+            (hierarchy_error or "hierarchy unavailable")[-4000:]
+        )
+    else:
+        if hierarchy_run is None:
+            raise ValueError("hierarchy run metadata is missing")
+        status = hierarchy_tree_status(
+            completeness=hierarchy_run.completeness,
+            frontend=hierarchy_run.frontend,
+            top=root.display_type,
+            unresolved_modules=unresolved_modules,
+        )
     status_path = out_dir / "hierarchy_status.json"
     status_path.write_text(
         json.dumps(status, indent=2, ensure_ascii=False) + "\n",
@@ -887,39 +950,79 @@ def main() -> int:
             temp_dir = tempfile.TemporaryDirectory(prefix=".mapper_", dir=out_dir)
             work_root = Path(temp_dir.name)
 
-        files, incdirs, defines, filelist_top = collect_verilog_inputs(source_root)
-        copy_runtime_data_files(source_root, work_root)
+        try:
+            inputs, files = collect_verilog_inputs(source_root)
+        except (FileNotFoundError, ValueError) as exc:
+            raise FilelistRecoveryError(
+                f"normalized filelist cannot select the design inputs: {exc}"
+            ) from exc
+
+        top = args.top
+        if not HDL_IDENTIFIER_RE.fullmatch(top):
+            raise ValueError(f"unsupported top module identifier: {top!r}")
         ranges = parse_module_ranges(files, source_root / "rtl")
         source_modules = {item.module for item in ranges}
+        if top not in source_modules:
+            raise FilelistRecoveryError(
+                f"top module is absent from source inventory: {top}"
+            )
+        mapped = parse_lint_csv(csv_path, ranges)
         hierarchy_error: str | None = None
-        try:
-            yosys = find_yosys(
-                explicit_bin=str(args.yosys) if args.yosys else None,
-                start_points=[source_root],
-            )
-            hierarchy_json, all_modules_json = run_yosys(
-                yosys,
-                files,
-                incdirs,
-                defines,
-                args.top or filelist_top,
-                work_root,
-            )
-            root, module_to_paths = build_hierarchy(hierarchy_json, source_modules)
-        except (OSError, RuntimeError, json.JSONDecodeError, KeyError) as exc:
-            print(
-                f"warning: hierarchy generation failed; using source-module fallback: {exc}",
-                file=sys.stderr,
-            )
-            hierarchy_error = str(exc)
+        hierarchy_run: HierarchyRun | None = None
+        unresolved_modules: dict[str, int] = {}
+        if args.module_only is not None:
+            hierarchy_error = args.module_only
             root = None
             module_to_paths = None
             metadata = build_source_metadata(ranges)
         else:
-            metadata = build_design_metadata(all_modules_json, ranges)
+            copy_runtime_data_files(source_root, work_root)
+            try:
+                yosys = find_yosys(
+                    explicit_bin=str(args.yosys) if args.yosys else None,
+                    start_points=[source_root],
+                )
+                hierarchy_run = run_yosys(
+                    yosys,
+                    inputs,
+                    top,
+                    work_root,
+                )
+                hierarchy_json = hierarchy_run.json_path
+                root, module_to_paths, unresolved_modules = build_hierarchy(
+                    hierarchy_json, source_modules
+                )
+            except (
+                OSError,
+                RuntimeError,
+                ValueError,
+                json.JSONDecodeError,
+                KeyError,
+            ) as exc:
+                if args.require_hierarchy:
+                    raise
+                print(
+                    "warning: hierarchy generation failed; using "
+                    f"source-module fallback: {exc}",
+                    file=sys.stderr,
+                )
+                hierarchy_error = str(exc)
+                root = None
+                module_to_paths = None
+                metadata = build_source_metadata(ranges)
+            else:
+                metadata = build_design_metadata(hierarchy_json, ranges)
+                apply_hierarchy_mapping(mapped, module_to_paths)
 
-        mapped = parse_lint_csv(csv_path, ranges, module_to_paths)
-        write_outputs(out_dir, root, mapped, metadata, hierarchy_error)
+        write_outputs(
+            out_dir,
+            root,
+            mapped,
+            metadata,
+            hierarchy_error,
+            hierarchy_run,
+            unresolved_modules,
+        )
 
         if args.keep_work:
             print(f"  work_dir: {work_root}")
@@ -932,6 +1035,9 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except FilelistRecoveryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(FILELIST_RECOVERY_EXIT_CODE)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1)

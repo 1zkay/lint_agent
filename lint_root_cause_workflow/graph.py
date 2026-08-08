@@ -80,6 +80,7 @@ def _build_merge_candidate_workflow(nodes: WorkflowNodes) -> Any:
 
 def build_workflow(
     *,
+    filelist_agent: Any,
     classifier_agent: Any,
     analysis_batch_agent: Any,
     merge_agent: Any,
@@ -94,6 +95,7 @@ def build_workflow(
     if ensemble_size < 1:
         raise ValueError("ensemble_size must be at least 1")
     nodes = WorkflowNodes(
+        filelist_agent=filelist_agent,
         classifier_agent=classifier_agent,
         analysis_batch_agent=analysis_batch_agent,
         merge_agent=merge_agent,
@@ -155,6 +157,13 @@ def build_workflow(
             return "classify_and_slice"
         return "analyze_batches"
 
+    def route_after_hierarchy_resolution(
+        state: WorkflowState,
+    ) -> Literal["resolve_hierarchy", "classify_and_slice"]:
+        if state.get("hierarchy_resolution_complete"):
+            return "classify_and_slice"
+        return "resolve_hierarchy"
+
     def route_after_catalog(state: WorkflowState) -> list[Send]:
         ensemble_dir = Path(state["run_dir"]) / "work" / "ensemble"
         return [
@@ -179,6 +188,7 @@ def build_workflow(
         output_schema=WorkflowOutput,
     )
     builder.add_node("prepare_inputs", nodes.prepare_inputs)
+    builder.add_node("resolve_hierarchy", nodes.resolve_hierarchy)
     builder.add_node("classify_and_slice", nodes.classify_and_slice)
     builder.add_node("analyze_batches", analyze_batches)
     builder.add_node("build_local_root_catalog", nodes.build_local_root_catalog)
@@ -187,7 +197,10 @@ def build_workflow(
     builder.add_node("export_final_report", nodes.export_final_report)
 
     builder.add_edge(START, "prepare_inputs")
-    builder.add_edge("prepare_inputs", "classify_and_slice")
+    builder.add_edge("prepare_inputs", "resolve_hierarchy")
+    builder.add_conditional_edges(
+        "resolve_hierarchy", route_after_hierarchy_resolution
+    )
     builder.add_conditional_edges(
         "classify_and_slice",
         route_after_slicing,

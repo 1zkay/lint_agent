@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import re
 import sys
+from typing import Any
 
 
 def _allow_maximum_csv_field_size() -> None:
@@ -77,7 +78,92 @@ MODULE_SCOPE_STATUS = "module_scope"
 
 ROOT_ID_RE = re.compile(r"^root_(\d{3,})$")
 VIOLATION_ID_RE = re.compile(r"^vio_(\d{3,})$")
+HDL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
 FALSE_POSITIVE_ROOT_ID = "误报"
+HIERARCHY_STATUS_SCHEMA_VERSION = 2
+FILELIST_RECOVERY_EXIT_CODE = 2
+HIERARCHY_ATTEMPTS = (
+    ("read_verilog", "complete"),
+    ("read_verilog", "partial"),
+    ("read_slang", "complete"),
+    ("read_slang", "partial"),
+)
+
+
+def hierarchy_module_status(reason: str) -> dict[str, Any]:
+    if not reason.strip():
+        raise ValueError("module hierarchy status requires a reason")
+    return {
+        "schema_version": HIERARCHY_STATUS_SCHEMA_VERSION,
+        "mode": "module",
+        "reason": reason,
+    }
+
+
+def hierarchy_tree_status(
+    *,
+    completeness: str,
+    frontend: str,
+    top: str,
+    unresolved_modules: dict[str, int],
+) -> dict[str, Any]:
+    status = {
+        "schema_version": HIERARCHY_STATUS_SCHEMA_VERSION,
+        "mode": "hierarchy",
+        "completeness": completeness,
+        "frontend": frontend,
+        "top": top,
+        "unresolved_modules": [
+            {"module": module, "instances": count}
+            for module, count in sorted(unresolved_modules.items())
+        ],
+    }
+    return validate_hierarchy_status(status)
+
+
+def validate_hierarchy_status(data: object) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError("hierarchy status must be an object")
+    mode = data.get("mode")
+    if (
+        data.get("schema_version") != HIERARCHY_STATUS_SCHEMA_VERSION
+        or mode not in {"hierarchy", "module"}
+    ):
+        raise ValueError("invalid hierarchy status version or mode")
+    if mode == "module":
+        if set(data) != {"schema_version", "mode", "reason"} or not str(
+            data.get("reason", "")
+        ).strip():
+            raise ValueError("invalid module hierarchy status")
+        return data
+
+    unresolved = data.get("unresolved_modules")
+    if (
+        set(data)
+        != {
+            "schema_version",
+            "mode",
+            "completeness",
+            "frontend",
+            "top",
+            "unresolved_modules",
+        }
+        or (data.get("frontend"), data.get("completeness"))
+        not in HIERARCHY_ATTEMPTS
+        or not str(data.get("top", "")).strip()
+        or not isinstance(unresolved, list)
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"module", "instances"}
+            or not str(item.get("module", "")).strip()
+            or not isinstance(item.get("instances"), int)
+            or item["instances"] < 1
+            for item in unresolved
+        )
+        or (data.get("completeness") == "complete" and unresolved)
+    ):
+        raise ValueError("invalid hierarchy status")
+    return data
 
 
 def format_root_id(number: int) -> str:

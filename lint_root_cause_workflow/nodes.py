@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -19,19 +20,27 @@ from config import config as app_config
 from memory.long_term import AgentContext
 
 from .prompts import (
+    FILELIST_RECOVERY_PARSER,
     SLICE_POLICY_PARSER,
     build_adjudication_prompt,
     build_analysis_batch_prompt,
     build_classifier_prompt,
     build_global_merge_prompt,
+    build_filelist_recovery_prompt,
 )
-from .state import AnalysisBatchState, MergeCandidateState, WorkflowState
+from .state import (
+    AnalysisBatchState,
+    FilelistRecoveryPlan,
+    MergeCandidateState,
+    WorkflowState,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_DIR = REPO_ROOT / "skills" / "verilog-lint-root-cause-csv"
 SCRIPT_DIR = SKILL_DIR / "scripts"
 PREPARE_SCRIPT = SCRIPT_DIR / "prepare_hierarchy_inputs.py"
+MAPPER_SCRIPT = SCRIPT_DIR / "lint_hierarchy_mapper.py"
 BUILD_SLICES_SCRIPT = SCRIPT_DIR / "build_slices.py"
 BUILD_CATALOG_SCRIPT = SCRIPT_DIR / "build_local_root_catalog.py"
 VALIDATE_MAP_SCRIPT = SCRIPT_DIR / "validate_global_root_map.py"
@@ -41,6 +50,8 @@ VALIDATE_REPORT_SCRIPT = SCRIPT_DIR / "validate_root_cause_csv.py"
 
 sys.path.insert(0, str(SCRIPT_DIR))
 try:
+    from _contract import HDL_IDENTIFIER_RE, validate_hierarchy_status
+    from _filelist import parse_filelist, render_filelist
     from _work_units import read_manifest
 finally:
     sys.path.pop(0)
@@ -95,24 +106,83 @@ def _stdout_value(result: ScriptResult, key: str) -> str:
     )
 
 
+def _read_hierarchy_status(path: Path) -> dict[str, Any]:
+    try:
+        return validate_hierarchy_status(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid hierarchy status: {path}: {exc}") from exc
+
+
 def _hierarchy_available(path: Path) -> bool:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError(f"invalid hierarchy status: {path}")
-    mode = data.get("mode")
-    expected_keys = (
-        {"schema_version", "mode"}
-        if mode == "hierarchy"
-        else {"schema_version", "mode", "reason"}
+    return _read_hierarchy_status(path)["mode"] == "hierarchy"
+
+
+def _plan_signature(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _file_signature(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _apply_recovery_filelist(
+    state: WorkflowState,
+    candidate_path: Path,
+) -> None:
+    run_dir = Path(state["run_dir"]).resolve()
+    rtl_dir = Path(state["rtl_dir"]).resolve()
+    filelist_path = Path(state["filelist_path"]).resolve()
+    if not candidate_path.is_file():
+        raise FileNotFoundError(
+            f"filelist recovery candidate not found: {candidate_path}"
+        )
+    inputs = parse_filelist(candidate_path, working_dir=run_dir)
+
+    if inputs.top != state["top_module"]:
+        raise ValueError(
+            "recovery filelist must declare the user-supplied top module "
+            f"{state['top_module']!r}"
+        )
+
+    def require_staged(path: Path, kind: str) -> Path:
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(rtl_dir)
+        except ValueError as exc:
+            raise ValueError(
+                f"recovery filelist {kind} is outside staged rtl/: {resolved}"
+            ) from exc
+        return resolved
+
+    source_files = inputs.source_files()
+    if not source_files:
+        raise ValueError("recovery filelist contains no HDL source files")
+    for path in source_files:
+        require_staged(path, "source")
+    for path in inputs.incdirs:
+        require_staged(path, "include directory")
+    for path in inputs.library_dirs:
+        require_staged(path, "library directory")
+
+    def staged_path(path: Path) -> str:
+        return require_staged(path, "path").relative_to(run_dir).as_posix()
+
+    contents = render_filelist(
+        inputs,
+        staged_path,
+        top=state["top_module"],
     )
-    if (
-        data.get("schema_version") != 1
-        or mode not in {"hierarchy", "module"}
-        or set(data) != expected_keys
-        or (mode == "module" and not str(data.get("reason", "")).strip())
-    ):
-        raise ValueError(f"invalid hierarchy status: {path}")
-    return mode == "hierarchy"
+    candidate_path.unlink(missing_ok=True)
+    temporary_path = filelist_path.with_suffix(filelist_path.suffix + ".tmp")
+    try:
+        temporary_path.write_text(contents, encoding="utf-8")
+        os.replace(temporary_path, filelist_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _agent_context(runtime: Runtime[AgentContext]) -> AgentContext:
@@ -137,12 +207,14 @@ class WorkflowNodes:
     def __init__(
         self,
         *,
+        filelist_agent: Any,
         classifier_agent: Any,
         analysis_batch_agent: Any,
         merge_agent: Any,
         judge_agent: Any,
         ensemble_size: int,
     ) -> None:
+        self.filelist_agent = filelist_agent
         self.classifier_agent = classifier_agent
         self.analysis_batch_agent = analysis_batch_agent
         self.merge_agent = merge_agent
@@ -150,6 +222,9 @@ class WorkflowNodes:
         self.ensemble_size = ensemble_size
 
     async def prepare_inputs(self, state: WorkflowState) -> dict[str, Any]:
+        top_module = state["top_module"].strip()
+        if not HDL_IDENTIFIER_RE.fullmatch(top_module):
+            raise ValueError(f"unsupported top module identifier: {top_module!r}")
         source_path = Path(state["source_path"]).expanduser().resolve()
         lint_csv_path = _required_path(
             Path(state["lint_csv_path"]).expanduser().resolve(),
@@ -168,6 +243,8 @@ class WorkflowNodes:
             str(source_path),
             "--lint-report",
             str(lint_csv_path),
+            "--top",
+            top_module,
         )
         if result.returncode:
             raise RuntimeError(f"input preparation failed: {_script_error(result)}")
@@ -206,11 +283,34 @@ class WorkflowNodes:
             raise RuntimeError(
                 "module-only preparation unexpectedly produced a hierarchy tree"
             )
-        _required_path(work_dir / "lint_entries_mapped.csv", directory=False)
-        design_metadata_path = _required_path(
-            work_dir / "design_metadata.json", directory=False
-        )
+        mapped_lint_path = work_dir / "lint_entries_mapped.csv"
+        design_metadata_path = work_dir / "design_metadata.json"
+        mapped_lint_available = mapped_lint_path.is_file()
+        metadata_available = design_metadata_path.is_file()
+        if mapped_lint_available != metadata_available:
+            raise RuntimeError("input preparation returned partial analysis outputs")
+        if hierarchy_available and not mapped_lint_available:
+            raise RuntimeError("hierarchy preparation omitted analysis outputs")
+        if metadata_available:
+            try:
+                metadata = json.loads(
+                    design_metadata_path.read_text(encoding="utf-8")
+                )
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"invalid design metadata: {design_metadata_path}: {exc}"
+                ) from exc
+            modules = metadata.get("modules")
+            if not isinstance(modules, dict):
+                raise ValueError(
+                    f"invalid source module inventory: {design_metadata_path}"
+                )
+            if top_module not in modules:
+                raise ValueError(
+                    f"top module is absent from the source inventory: {top_module}"
+                )
         return {
+            "top_module": top_module,
             "run_dir": str(run_dir),
             "rtl_dir": str(rtl_dir),
             "filelist_path": str(filelist_path),
@@ -222,11 +322,224 @@ class WorkflowNodes:
             "adjudicated_map_path": "",
             "draft_csv": str(work_dir / "root_cause_draft.csv"),
             "report_path": str(report_path),
+            "hierarchy_resolution_complete": hierarchy_available,
+            "filelist_recovery_error": "",
+            "filelist_recovery_history": [],
             "slice_error": "",
             "validation_error": "",
             "work_unit_results": [],
             "merge_candidate_results": [],
         }
+
+    async def resolve_hierarchy(
+        self,
+        state: WorkflowState,
+        config: RunnableConfig,
+        runtime: Runtime[AgentContext],
+    ) -> dict[str, Any]:
+        status_path = Path(state["hierarchy_status_path"])
+        if _hierarchy_available(status_path):
+            return {
+                "hierarchy_resolution_complete": True,
+                "filelist_recovery_error": "",
+            }
+
+        work_dir = status_path.parent
+        history = state.get("filelist_recovery_history", [])
+        recovery_filelist_path = Path(state["run_dir"]) / ".filelist.recovery.f"
+        recovery_filelist_path.unlink(missing_ok=True)
+        prompt = build_filelist_recovery_prompt(
+            rtl_dir=state["rtl_dir"],
+            filelist_path=state["filelist_path"],
+            recovery_filelist_path=str(recovery_filelist_path),
+            design_metadata_path=state["design_metadata_path"],
+            hierarchy_status_path=str(status_path),
+            work_dir=str(work_dir / "_work"),
+            top_module=state["top_module"],
+            previous_error=state.get("filelist_recovery_error", ""),
+            previous_attempts=history,
+        )
+        result = await self.filelist_agent.ainvoke(
+            {"messages": [{"role": "user", "content": prompt}]},
+            config=config,
+            context=_agent_context(runtime),
+        )
+        final_message: Any | None = None
+        try:
+            final_message = result["messages"][-1]
+            plan = FILELIST_RECOVERY_PARSER.invoke(final_message)
+        except (KeyError, IndexError, TypeError, OutputParserException) as exc:
+            recovery_filelist_path.unlink(missing_ok=True)
+            raw = str(getattr(final_message, "content", ""))
+            marker = f"invalid:{_plan_signature(raw)}"
+            if marker in history:
+                return await self._finalize_module_fallback(
+                    state,
+                    work_dir,
+                    "filelist resolver repeatedly returned invalid JSON",
+                    history,
+                )
+            return {
+                "hierarchy_resolution_complete": False,
+                "filelist_recovery_error": f"invalid recovery JSON: {exc}",
+                "filelist_recovery_history": [*history, marker],
+            }
+
+        validation_error = self._validate_filelist_plan(
+            plan,
+            candidate_exists=recovery_filelist_path.is_file(),
+        )
+        if validation_error:
+            invalid_marker = "invalid:" + _plan_signature(
+                json.dumps(
+                    {
+                        "plan": plan.model_dump(),
+                        "filelist_sha256": _file_signature(
+                            recovery_filelist_path
+                        ),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            recovery_filelist_path.unlink(missing_ok=True)
+            if invalid_marker in history:
+                return await self._finalize_module_fallback(
+                    state,
+                    work_dir,
+                    "filelist resolver repeated an invalid decision",
+                    history,
+                )
+            return {
+                "hierarchy_resolution_complete": False,
+                "filelist_recovery_error": validation_error,
+                "filelist_recovery_history": [*history, invalid_marker],
+            }
+        if plan.action == "module_fallback":
+            recovery_filelist_path.unlink(missing_ok=True)
+            return await self._finalize_module_fallback(
+                state,
+                work_dir,
+                plan.reason,
+                history,
+            )
+
+        filelist_marker = f"filelist:{_file_signature(recovery_filelist_path)}"
+        if filelist_marker in history:
+            recovery_filelist_path.unlink(missing_ok=True)
+            return await self._finalize_module_fallback(
+                state,
+                work_dir,
+                "filelist recovery made no further progress",
+                history,
+            )
+        next_history = [*history, filelist_marker]
+
+        try:
+            _apply_recovery_filelist(state, recovery_filelist_path)
+        except (FileNotFoundError, ValueError) as exc:
+            recovery_filelist_path.unlink(missing_ok=True)
+            return {
+                "hierarchy_resolution_complete": False,
+                "filelist_recovery_error": f"invalid recovery filelist: {exc}",
+                "filelist_recovery_history": next_history,
+            }
+
+        arguments = [
+            "--csv",
+            state["lint_csv_path"],
+            "--source",
+            state["run_dir"],
+            "--out-dir",
+            str(work_dir),
+            "--keep-work",
+            "--require-hierarchy",
+            "--top",
+            state["top_module"],
+        ]
+        mapper_result = await _run_script(MAPPER_SCRIPT, *arguments)
+        if mapper_result.returncode:
+            return {
+                "hierarchy_resolution_complete": False,
+                "filelist_recovery_error": _script_error(mapper_result),
+                "filelist_recovery_history": next_history,
+            }
+
+        status = _read_hierarchy_status(status_path)
+        if (
+            status["mode"] != "hierarchy"
+            or status["top"] != state["top_module"]
+        ):
+            raise RuntimeError("hierarchy mapper returned an unexpected status")
+        _required_path(work_dir / "hierarchy_tree.txt", directory=False)
+        _required_path(work_dir / "lint_entries_mapped.csv", directory=False)
+        _required_path(work_dir / "design_metadata.json", directory=False)
+        shutil.rmtree(work_dir / "_work", ignore_errors=True)
+        return {
+            "hierarchy_resolution_complete": True,
+            "filelist_recovery_error": "",
+            "filelist_recovery_history": next_history,
+        }
+
+    @staticmethod
+    async def _finalize_module_fallback(
+        state: WorkflowState,
+        work_dir: Path,
+        reason: str,
+        history: list[str],
+    ) -> dict[str, Any]:
+        result = await _run_script(
+            MAPPER_SCRIPT,
+            "--csv",
+            state["lint_csv_path"],
+            "--source",
+            state["run_dir"],
+            "--out-dir",
+            str(work_dir),
+            "--module-only",
+            reason.strip() or "filelist recovery exhausted",
+            "--top",
+            state["top_module"],
+        )
+        if result.returncode:
+            raise RuntimeError(
+                f"module-level hierarchy fallback failed: {_script_error(result)}"
+            )
+
+        status = _read_hierarchy_status(Path(state["hierarchy_status_path"]))
+        if status["mode"] != "module":
+            raise RuntimeError("hierarchy mapper did not enter module fallback")
+        hierarchy_tree_path = work_dir / "hierarchy_tree.txt"
+        if hierarchy_tree_path.exists():
+            raise RuntimeError(
+                "module fallback unexpectedly produced a hierarchy tree"
+            )
+        _required_path(work_dir / "lint_entries_mapped.csv", directory=False)
+        _required_path(work_dir / "design_metadata.json", directory=False)
+        return {
+            "hierarchy_resolution_complete": True,
+            "filelist_recovery_error": "",
+            "filelist_recovery_history": history,
+        }
+
+    @staticmethod
+    def _validate_filelist_plan(
+        plan: FilelistRecoveryPlan,
+        *,
+        candidate_exists: bool,
+    ) -> str:
+        if not plan.reason.strip():
+            return "recovery reason must not be empty"
+        if plan.action == "module_fallback":
+            return (
+                "module_fallback must not create a recovery filelist"
+                if candidate_exists
+                else ""
+            )
+        if not candidate_exists:
+            return "retry requires a recovery filelist candidate"
+        return ""
 
     async def classify_and_slice(
         self,
@@ -244,6 +557,7 @@ class WorkflowNodes:
                 hierarchy_status_path.parent / "hierarchy_tree.txt"
             ),
             design_metadata_path=state["design_metadata_path"],
+            top_module=state["top_module"],
             previous_error=state.get("slice_error", ""),
         )
         result = await self.classifier_agent.ainvoke(
@@ -271,6 +585,8 @@ class WorkflowNodes:
             str(Path(state["design_metadata_path"]).parent),
             "--policy",
             state["policy_path"],
+            "--top",
+            state["top_module"],
         ]
         if not hierarchy_available:
             build_arguments.append("--module-only")

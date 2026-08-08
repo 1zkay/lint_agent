@@ -10,6 +10,7 @@ from typing_extensions import TypedDict
 class WorkflowInput(TypedDict):
     source_path: str
     lint_csv_path: str
+    top_module: str
 
 
 class WorkflowOutput(TypedDict):
@@ -38,6 +39,9 @@ class WorkflowState(WorkflowInput, total=False):
     adjudicated_map_path: str
     draft_csv: str
     report_path: str
+    hierarchy_resolution_complete: bool
+    filelist_recovery_error: str
+    filelist_recovery_history: list[str]
     slice_error: str
     validation_error: str
     work_unit_results: Annotated[list[WorkUnitResult], operator.add]
@@ -88,3 +92,13 @@ class SlicePolicy(BaseModel):
     level2: list[str]
     level3: list[str]
     level4: list[str]
+
+
+class FilelistRecoveryPlan(BaseModel):
+    """Constrained filelist recovery decision returned by the resolver agent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    action: Literal["retry", "module_fallback"]
+    reason: str

@@ -70,7 +70,7 @@ LangGraph lint tool workflow
 | Agentic RAG            | `rag/hardware_reference.py`         | Reference-document retrieval and answer generation              |
 | Long-term memory       | `memory/long_term.py`               | User profile and durable memory tools                           |
 | LangGraph Agent Server | `langgraph_server/agent_runtime.py` | Alternative HTTP/CLI agent runtime                              |
-| Root-cause workflow    | `lint_root_cause_workflow/`         | Shared two-input workflow used by the native tool              |
+| Root-cause workflow    | `lint_root_cause_workflow/`         | Shared source, lint CSV, and top-module workflow               |
 
 ## Requirements
 

@@ -4,10 +4,25 @@ from __future__ import annotations
 
 from langchain_core.output_parsers import PydanticOutputParser
 
-from .state import SlicePolicy
+from .state import FilelistRecoveryPlan, SlicePolicy
 
 
 SLICE_POLICY_PARSER = PydanticOutputParser(pydantic_object=SlicePolicy)
+FILELIST_RECOVERY_PARSER = PydanticOutputParser(
+    pydantic_object=FilelistRecoveryPlan
+)
+
+
+FILELIST_RESOLVER_SYSTEM_PROMPT = """
+You are a senior Verilog/SystemVerilog filelist engineer. Diagnose only whether
+the normalized filelist is wrong or incomplete after deterministic input and
+hierarchy preparation failed. Use only the staged design and supplied local
+artifacts. You may write only the supplied recovery filelist candidate. Do not
+modify source files or the normalized filelist directly, create stub modules,
+run Yosys yourself, change the user-supplied top module, perform lint root-cause
+analysis, or choose a frontend or hierarchy mode. Return one constrained
+filelist recovery decision.
+""".strip()
 
 
 CLASSIFIER_SYSTEM_PROMPT = """
@@ -44,6 +59,61 @@ and RTL before deciding. Do not decide by majority agreement.
 """.strip()
 
 
+def build_filelist_recovery_prompt(
+    *,
+    rtl_dir: str,
+    filelist_path: str,
+    recovery_filelist_path: str,
+    design_metadata_path: str,
+    hierarchy_status_path: str,
+    work_dir: str,
+    top_module: str,
+    previous_error: str,
+    previous_attempts: list[str],
+) -> str:
+    retry_context = ""
+    if previous_error:
+        retry_context = f"""
+The previous recovery attempt failed:
+{previous_error}
+
+Do not repeat a previous filelist unchanged. Previous attempts:
+{chr(10).join(previous_attempts)}
+""".strip()
+    return f"""
+Inspect these prepared artifacts:
+
+- RTL directory: {rtl_dir}
+- normalized filelist: {filelist_path}
+- optional recovery filelist candidate: {recovery_filelist_path}
+- source module inventory, if available: {design_metadata_path}
+- hierarchy status: {hierarchy_status_path}
+- available Yosys scripts and logs: {work_dir}
+- user-supplied top module: {top_module}
+
+For every loadable filelist, the executor attempts, in order,
+`read_verilog + complete`, `read_verilog + partial`, `read_slang + complete`,
+and `read_slang + partial`. Do not retry the same filelist or select among those
+modes yourself.
+
+Choose `retry` only when local evidence supports a concrete filelist correction.
+Copy the normalized filelist to the exact recovery candidate path and edit only
+that candidate. Preserve the immutable user-supplied top module, reference only
+files and directories inside the staged RTL directory, and make every source,
+ordering, language, macro, include, or library correction in that candidate.
+Choose `module_fallback` when no evidence-backed filelist correction remains,
+and do not create a candidate in that case. Explain the decision briefly in
+`reason`.
+
+Return only one JSON object without commentary or Markdown. Follow this format
+exactly:
+
+{FILELIST_RECOVERY_PARSER.get_format_instructions()}
+
+{retry_context}
+""".strip()
+
+
 def build_classifier_prompt(
     *,
     rtl_dir: str,
@@ -51,6 +121,7 @@ def build_classifier_prompt(
     hierarchy_available: bool,
     hierarchy_tree_path: str,
     design_metadata_path: str,
+    top_module: str,
     previous_error: str,
 ) -> str:
     retry_context = (
@@ -64,13 +135,16 @@ def build_classifier_prompt(
 
 Classify every module present in the active hierarchy. Do not classify modules
 absent from it. Structural depth is evidence, not the semantic decision rule.
-The level4 module must be the elaborated top module.
+The level4 module must be the user-supplied top module. Lines marked
+`[unresolved]` are external boundaries without source definitions; do not
+classify them.
 """.strip()
     else:
         structure_input = """
 Hierarchy elaboration is unavailable. Read the filelist, module inventory, and
-RTL sources directly; classify every inventoried source module and infer exactly
-one design top for level4. Do not invent modules or instance paths.
+RTL sources directly; classify every inventoried source module and use the
+user-supplied top module as the only level4 module. Do not infer another top or
+invent modules or instance paths.
 """.strip()
     return f"""
 Classify every selected module exactly once into these four semantic levels:
@@ -92,6 +166,7 @@ Read:
 - RTL directory: {rtl_dir}
 - filelist: {filelist_path}
 - design metadata: {design_metadata_path}
+- user-supplied top module: {top_module}
 
 {structure_input}
 
