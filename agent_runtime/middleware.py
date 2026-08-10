@@ -18,8 +18,10 @@ from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.backends.local_shell import LocalShellBackend
 from deepagents.middleware import filesystem as deepagents_filesystem
+from deepagents.middleware.filesystem import FilesystemMiddleware, FsToolName
 from langchain.agents.middleware import (
     ModelRetryMiddleware,
+    TodoListMiddleware,
     ToolRetryMiddleware,
 )
 from langchain_core.globals import set_debug
@@ -41,6 +43,15 @@ logger = logging.getLogger(__name__)
 set_debug(True)
 _FILESYSTEM_ROOT_PATH: Path | None = None
 _DISABLED_GENERAL_PURPOSE_PROFILE_KEYS: set[str] = set()
+# Keep the pre-0.7 tool surface; recursive `delete` is intentionally excluded.
+_PROJECT_FILESYSTEM_TOOLS: tuple[FsToolName, ...] = (
+    "ls",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob",
+    "grep",
+)
 
 
 FILESYSTEM_PATH_SYSTEM_PROMPT = """## Project Filesystem Path Conventions
@@ -223,12 +234,17 @@ def disable_default_general_purpose_subagent(llm: Any, *, log_prefix: str) -> bo
 def _build_project_middleware(
     llm: Any,
     *,
+    backend: CompositeBackend,
+    filesystem_tools: list[FsToolName],
     log_prefix: str,
     tool_retry_tools: list[Any] | None = None,
     model_retry_on_failure: Literal["continue", "error"] = "continue",
 ) -> list[Any]:
     """Build project-specific middleware added after the DeepAgents base stack."""
-    middleware_stack: list[Any] = []
+    middleware_stack: list[Any] = [
+        FilesystemMiddleware(backend=backend, tools=filesystem_tools),
+        TodoListMiddleware(),
+    ]
 
     if config.agent_enable_reflection:
         middleware_stack.append(
@@ -282,6 +298,7 @@ def create_lint_deep_agent(
     """Create the ALINT agent through the official DeepAgents entrypoint."""
     root_path = Path(root_dir).resolve()
     enable_unrestricted_deepagents_paths(root_path)
+    backend = _build_deep_agent_backend(root_path)
 
     normalized_skill_sources = normalize_skill_sources(config.agent_skills_dirs, root_path)
     skill_sources = normalized_skill_sources if config.agent_enable_skills and normalized_skill_sources else None
@@ -300,6 +317,7 @@ def create_lint_deep_agent(
     if config.agent_enable_subagents:
         subagents = build_lint_subagents(
             llm,
+            backend=backend,
             tools=tools,
             normalized_skill_sources=normalized_skill_sources,
             enable_skills=bool(skill_sources),
@@ -325,15 +343,17 @@ def create_lint_deep_agent(
     if guarded_tools:
         logger.info("%s create_deep_agent tool approval enabled for: %s", log_prefix, guarded_tools)
 
+    runtime_tool_names: list[FsToolName] = (
+        ["execute"] if deepagents_filesystem.supports_execution(backend) else []
+    )
+    filesystem_tools = [*_PROJECT_FILESYSTEM_TOOLS, *runtime_tool_names]
     middleware_stack = _build_project_middleware(
         llm,
+        backend=backend,
+        filesystem_tools=filesystem_tools,
         log_prefix=log_prefix,
         tool_retry_tools=tool_retry_tools,
         model_retry_on_failure=model_retry_on_failure,
-    )
-    backend = _build_deep_agent_backend(root_path)
-    runtime_tool_names = (
-        ["execute"] if deepagents_filesystem.supports_execution(backend) else []
     )
     if runtime_tool_names:
         logger.info(
@@ -365,13 +385,7 @@ def create_lint_deep_agent(
     )
     runtime_tools = [
         "write_todos",
-        "ls",
-        "read_file",
-        "write_file",
-        "edit_file",
-        "glob",
-        "grep",
-        *runtime_tool_names,
+        *filesystem_tools,
     ]
     if config.agent_enable_subagents or not default_general_purpose_disabled:
         runtime_tools.append("task")

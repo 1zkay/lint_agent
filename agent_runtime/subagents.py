@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from deepagents.middleware.filesystem import FilesystemPermission
+from deepagents.backends.protocol import BackendProtocol
+from deepagents.middleware.filesystem import FilesystemMiddleware, FsToolName
 from deepagents.middleware.subagents import SubAgent
 
 REFERENCE_TOOL_NAMES = {"query_reference_docs"}
+_READ_ONLY_FILESYSTEM_TOOLS: tuple[FsToolName, ...] = (
+    "ls",
+    "read_file",
+    "glob",
+    "grep",
+)
 
 SUBAGENT_BOUNDARY_PROMPT = """## Delegation Boundary
 
@@ -41,23 +48,19 @@ def _select_tools(tools: list[Any] | None, allowed_names: set[str]) -> list[Any]
     ]
 
 
-def _read_only_filesystem_permissions() -> list[FilesystemPermission]:
-    return [
-        FilesystemPermission(
-            operations=["write"],
-            paths=["/**"],
-            mode="deny",
-        )
-    ]
-
-
 def _with_common_subagent_options(
     spec: SubAgent,
     *,
+    backend: BackendProtocol,
     normalized_skill_sources: list[str],
     enable_skills: bool,
 ) -> SubAgent:
-    spec["permissions"] = _read_only_filesystem_permissions()
+    spec["middleware"] = [
+        FilesystemMiddleware(
+            backend=backend,
+            tools=list(_READ_ONLY_FILESYSTEM_TOOLS),
+        )
+    ]
     if enable_skills and normalized_skill_sources:
         spec["skills"] = normalized_skill_sources
     return spec
@@ -66,14 +69,15 @@ def _with_common_subagent_options(
 def build_lint_subagents(
     llm: Any,
     *,
+    backend: BackendProtocol,
     tools: list[Any] | None,
     normalized_skill_sources: list[str],
     enable_skills: bool,
 ) -> list[SubAgent]:
     """Return broad, reusable DeepAgents subagent specs for lint analysis.
 
-    The specs intentionally leave middleware construction to `create_deep_agent`,
-    which applies the official DeepAgents stack to each child agent.
+    Each project subagent replaces the default filesystem middleware with the
+    official read-only tool allowlist; DeepAgents supplies the rest of the stack.
     """
 
     reference_tools = _select_tools(tools, REFERENCE_TOOL_NAMES)
@@ -81,6 +85,7 @@ def build_lint_subagents(
     def with_common(spec: SubAgent) -> SubAgent:
         return _with_common_subagent_options(
             spec,
+            backend=backend,
             normalized_skill_sources=normalized_skill_sources,
             enable_skills=enable_skills,
         )
