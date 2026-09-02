@@ -249,6 +249,7 @@ class Config:
         )
 
         # ── Agent 中间件 ──────────────────────────────────────────────────
+        self.agent_debug = self._bool_env("AGENT_DEBUG", "false")
         self.agent_enable_reflection = self._bool_env("AGENT_ENABLE_REFLECTION", "false")
         self.agent_reflection_max = int(os.getenv("AGENT_REFLECTION_MAX", "1"))
         self.agent_enable_model_retry = self._bool_env("AGENT_ENABLE_MODEL_RETRY", "true")

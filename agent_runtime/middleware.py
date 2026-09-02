@@ -24,7 +24,6 @@ from langchain.agents.middleware import (
     TodoListMiddleware,
     ToolRetryMiddleware,
 )
-from langchain_core.globals import set_debug
 
 from config import config
 from agent_runtime.reflection import ReflectionMiddleware
@@ -40,7 +39,6 @@ from workspace.path_resolver import (
 )
 
 logger = logging.getLogger(__name__)
-set_debug(True)
 _FILESYSTEM_ROOT_PATH: Path | None = None
 _DISABLED_GENERAL_PURPOSE_PROFILE_KEYS: set[str] = set()
 # Keep the pre-0.7 tool surface; recursive `delete` is intentionally excluded.
@@ -376,6 +374,7 @@ def create_lint_deep_agent(
         store=store,
         context_schema=context_schema,
         name=name,
+        debug=config.agent_debug,
     )
 
     logger.info(
