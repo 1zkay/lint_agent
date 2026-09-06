@@ -8,7 +8,7 @@ dependencies:
       - asyncpg==0.31.0
       - aiofiles==24.1.0
       - boto3==1.42.62
-      - chainlit==2.11.1
+      - chainlit==2.12.0
       - deepagents==0.7.12
       - faiss-cpu==1.13.2
       - fastmcp==3.1.0
@@ -30,7 +30,7 @@ dependencies:
       - langgraph-cli[inmem]==0.4.30
       - langgraph-prebuilt==1.1.0
       - langgraph-runtime-inmem==0.30.2
-      - mcp==1.26.0
+      - mcp==1.29.1
       - openai==2.42.0
       - psycopg[binary,pool]==3.3.3
       - pydantic[email]==2.11.7

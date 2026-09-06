@@ -32,7 +32,8 @@ large_tool_results/
 *.tmp
 
 # Chainlit / local storage
-.chainlit/
+.chainlit/*
+!.chainlit/config.toml
 .files/
 .local/
 

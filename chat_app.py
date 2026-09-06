@@ -224,8 +224,8 @@ async def on_settings_update(settings: dict[str, Any]):
 
 @cl.on_chat_end
 async def on_chat_end():
-    """Chainlit session 结束时正确关闭 MCP stdio 子进程。"""
-    await _stop_runtime_owner(wait=True)
+    """Chainlit session 结束时通知 runtime owner 关闭资源。"""
+    await _stop_runtime_owner(wait=False)
 
 
 @cl.on_message
