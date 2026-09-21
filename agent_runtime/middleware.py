@@ -19,11 +19,15 @@ from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.backends.local_shell import LocalShellBackend
 from deepagents.middleware import filesystem as deepagents_filesystem
 from deepagents.middleware.filesystem import FilesystemMiddleware, FsToolName
+from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from langchain.agents.middleware import (
     ModelRetryMiddleware,
     TodoListMiddleware,
+    ToolErrorMiddleware,
     ToolRetryMiddleware,
 )
+from langchain.agents.middleware.types import ToolCallRequest
+from langchain_core.exceptions import ModelError
 
 from config import config
 from agent_runtime.reflection import ReflectionMiddleware
@@ -235,7 +239,7 @@ def _build_project_middleware(
     backend: CompositeBackend,
     filesystem_tools: list[FsToolName],
     log_prefix: str,
-    tool_retry_tools: list[Any] | None = None,
+    tool_retry_tools: list[Any],
     model_retry_on_failure: Literal["continue", "error"] = "continue",
 ) -> list[Any]:
     """Build project-specific middleware added after the DeepAgents base stack."""
@@ -253,6 +257,35 @@ def _build_project_middleware(
         )
         logger.info("%s ReflectionMiddleware enabled (max_reflections=%s)", log_prefix, config.agent_reflection_max)
 
+    middleware_stack.extend(_build_retry_middleware(
+        log_prefix=log_prefix,
+        tool_retry_tools=tool_retry_tools,
+        model_retry_on_failure=model_retry_on_failure,
+    ))
+    middleware_stack.append(ToolErrorMiddleware(_subagent_model_error, tools=["task"]))
+    return middleware_stack
+
+
+def _subagent_model_error(exc: Exception, request: ToolCallRequest) -> str | None:
+    """Keep a provider failure local to its delegated task; never replay the task."""
+    if isinstance(exc, ModelError):
+        logger.warning("Subagent model failed (tool_call_id=%s): %s", request.tool_call["id"], exc)
+        return (
+            f"Subagent failed with {type(exc).__name__}. "
+            "Report this part as unavailable and use the other completed results. "
+            "Do not repeat the same delegated request."
+        )
+    return None
+
+
+def _build_retry_middleware(
+    *,
+    log_prefix: str,
+    tool_retry_tools: list[Any],
+    model_retry_on_failure: Literal["continue", "error"],
+) -> list[Any]:
+    """Create separate official retry middleware instances for each agent."""
+    middleware_stack: list[Any] = []
     if config.agent_enable_model_retry:
         middleware_stack.append(
             ModelRetryMiddleware(
@@ -297,6 +330,12 @@ def create_lint_deep_agent(
     root_path = Path(root_dir).resolve()
     enable_unrestricted_deepagents_paths(root_path)
     backend = _build_deep_agent_backend(root_path)
+    runtime_tool_names: list[FsToolName] = (
+        ["execute"] if deepagents_filesystem.supports_execution(backend) else []
+    )
+    filesystem_tools = [*_PROJECT_FILESYSTEM_TOOLS, *runtime_tool_names]
+    # Only retry explicitly supplied tools, never an entire delegated task.
+    retry_tools = tools if tool_retry_tools is None else tool_retry_tools
 
     normalized_skill_sources = normalize_skill_sources(config.agent_skills_dirs, root_path)
     skill_sources = normalized_skill_sources if config.agent_enable_skills and normalized_skill_sources else None
@@ -320,8 +359,24 @@ def create_lint_deep_agent(
             normalized_skill_sources=normalized_skill_sources,
             enable_skills=bool(skill_sources),
         )
+        # Official named override preserves the default prompt while making the
+        # general-purpose agent's tool and middleware configuration explicit.
+        subagents.append({
+            **GENERAL_PURPOSE_SUBAGENT,
+            "model": llm,
+            "tools": tools,
+            "skills": skill_sources or [],
+            "middleware": [FilesystemMiddleware(backend=backend, tools=filesystem_tools)],
+        })
+        retry_tool_names = {tool.name for tool in retry_tools}
+        for subagent in subagents:
+            subagent["middleware"].extend(_build_retry_middleware(
+                log_prefix=f"{log_prefix}:{subagent['name']}",
+                tool_retry_tools=[tool for tool in subagent["tools"] if tool.name in retry_tool_names],
+                model_retry_on_failure="error",
+            ))
         logger.info(
-            "%s create_deep_agent lint subagents enabled (subagents=%s, general-purpose=auto)",
+            "%s create_deep_agent subagents enabled (subagents=%s)",
             log_prefix,
             [subagent["name"] for subagent in subagents],
         )
@@ -341,16 +396,12 @@ def create_lint_deep_agent(
     if guarded_tools:
         logger.info("%s create_deep_agent tool approval enabled for: %s", log_prefix, guarded_tools)
 
-    runtime_tool_names: list[FsToolName] = (
-        ["execute"] if deepagents_filesystem.supports_execution(backend) else []
-    )
-    filesystem_tools = [*_PROJECT_FILESYSTEM_TOOLS, *runtime_tool_names]
     middleware_stack = _build_project_middleware(
         llm,
         backend=backend,
         filesystem_tools=filesystem_tools,
         log_prefix=log_prefix,
-        tool_retry_tools=tool_retry_tools,
+        tool_retry_tools=retry_tools,
         model_retry_on_failure=model_retry_on_failure,
     )
     if runtime_tool_names:

@@ -73,6 +73,7 @@ from app.chainlit_streaming import (
     message_preview as _message_preview,
     should_show_run_step as _should_show_run_step,
     step_name as _step_name,
+    stream_error_text as _stream_error_text,
     sync_todos_to_tasklist as _sync_todos_to_tasklist,
     tool_call_summary as _tool_call_summary,
     tool_input_for_step as _tool_input_for_step,
@@ -225,11 +226,30 @@ async def on_settings_update(settings: dict[str, Any]):
 @cl.on_chat_end
 async def on_chat_end():
     """Chainlit session 结束时通知 runtime owner 关闭资源。"""
-    await _stop_runtime_owner(wait=False)
+    await _stop_runtime_owner(wait=False, reason="chat_end")
 
 
 @cl.on_message
 async def on_message(message: cl.Message):
+    close_event = cl.user_session.get("runtime_close_event")
+    if not cl.user_session.get("agent") or (close_event and close_event.is_set()):
+        await _initialize_chat_runtime(
+            cl.user_session.get("thread_id") or _get_chainlit_thread_id_fallback(),
+            send_intro=False,
+            llm_preset_id=cl.user_session.get("llm_preset_id"),
+        )
+    active_tasks = cl.user_session.get("active_agent_tasks")
+    if active_tasks is None:
+        return
+    task = asyncio.current_task()
+    active_tasks.add(task)
+    try:
+        await _run_agent_message(message)
+    finally:
+        active_tasks.discard(task)
+
+
+async def _run_agent_message(message: cl.Message):
     """
     接收用户消息，统一走 create_deep_agent 主链路（官方短期记忆主入口）。
 
@@ -249,11 +269,6 @@ async def on_message(message: cl.Message):
     - 本函数经 agent.astream_events 执行，状态更新自动落入 checkpointer。
     """
     agent = cl.user_session.get("agent")
-    if not agent:
-        await cl.Message(
-            content="⚠️ 未配置 LLM，无法回答问题。请配置 `.env` 后重启。"
-        ).send()
-        return
 
     thread_id: str = cl.user_session.get("thread_id")
     current_message_id = str(getattr(message, "id", "") or "")
@@ -288,9 +303,11 @@ async def on_message(message: cl.Message):
         task_list.status = "Ready"
         await task_list.send()
 
-    final_response = await cl.Message(content="").send()
+    final_response = await cl.Message(content="正在处理…").send()
 
     _reported_usage_message_keys: set[str] = set()
+    subagent_steps: dict[str, cl.Step] = {}
+    subagent_errors: dict[str, str] = {}
 
     def _usage_message_key(message: Any) -> str:
         message_id = str(getattr(message, "id", "") or "").strip()
@@ -394,28 +411,19 @@ async def on_message(message: cl.Message):
             await _drain_v3_tool_output_deltas(tool_call_stream)
             return
         if tool_name in SUBAGENT_DISPATCH_TOOL_NAMES:
+            # Named child runs are rendered by run.subagents, including failures.
             await _drain_v3_tool_output_deltas(tool_call_stream)
             error = str(getattr(tool_call_stream, "error", "") or "")
+            output = getattr(tool_call_stream, "output", None)
+            if not error and getattr(output, "status", None) == "error":
+                error = _message_text(output)
             if error:
-                subagent_type = ""
-                if isinstance(tool_input, dict):
-                    subagent_type = str(tool_input.get("subagent_type") or "").strip()
-
-                task_step_name = "🤖 task"
-                if subagent_type:
-                    task_step_name = f"🤖 {subagent_type}"
-
-                step = cl.Step(
-                    name=task_step_name,
-                    type="run",
-                    parent_id=parent_id,
-                    default_open=default_open,
-                    auto_collapse=True,
-                )
-                step.is_error = True
-                step.output = error[:output_limit]
-                await step.send()
-                await step.update()
+                call_id = tool_call_stream.tool_call_id
+                subagent_errors[call_id] = error
+                if step := subagent_steps.get(call_id):
+                    step.is_error = True
+                    step.output = error[:output_limit]
+                    await step.update()
             return
 
         step_input, show_input = _tool_input_for_step(tool_input)
@@ -449,6 +457,12 @@ async def on_message(message: cl.Message):
                 report_path = _root_cause_report_path(tool_name, output)
                 if report_path is not None:
                     await _send_root_cause_report(report_path)
+        except asyncio.CancelledError:
+            step.output = "已取消。"
+            raise
+        except Exception as exc:
+            step.is_error = True
+            step.output = _stream_error_text(exc)[:output_limit]
         finally:
             if step_sent:
                 try:
@@ -457,11 +471,9 @@ async def on_message(message: cl.Message):
                     pass
 
     async def _consume_v3_tool_calls(run: Any) -> None:
-        tool_tasks: list[asyncio.Task[None]] = []
-        async for tool_call_stream in run.tool_calls:
-            tool_tasks.append(asyncio.create_task(_consume_v3_tool_call(tool_call_stream)))
-        if tool_tasks:
-            await asyncio.gather(*tool_tasks)
+        async with asyncio.TaskGroup() as tasks:
+            async for tool_call_stream in run.tool_calls:
+                tasks.create_task(_consume_v3_tool_call(tool_call_stream))
 
     async def _consume_v3_subagent(subagent_stream: Any) -> None:
         subagent_name = str(
@@ -469,6 +481,10 @@ async def on_message(message: cl.Message):
             or "subagent"
         )
         step = cl.Step(name=f"🤖 {subagent_name}", type="run", default_open=True)
+        cause = getattr(subagent_stream, "cause", None) or {}
+        call_id = str(cause.get("tool_call_id") or "")
+        if call_id:
+            subagent_steps[call_id] = step
         step_sent = False
         output_buffer = ""
 
@@ -496,10 +512,9 @@ async def on_message(message: cl.Message):
             tool_calls = getattr(subagent_stream, "tool_calls", None)
             if tool_calls is None:
                 return
-            tool_tasks: list[asyncio.Task[None]] = []
-            async for tool_call_stream in tool_calls:
-                tool_tasks.append(
-                    asyncio.create_task(
+            async with asyncio.TaskGroup() as tasks:
+                async for tool_call_stream in tool_calls:
+                    tasks.create_task(
                         _consume_v3_tool_call(
                             tool_call_stream,
                             parent_id=step.id,
@@ -507,18 +522,14 @@ async def on_message(message: cl.Message):
                             output_limit=10000,
                         )
                     )
-                )
-            if tool_tasks:
-                await asyncio.gather(*tool_tasks)
 
         try:
             await step.send()
             step_sent = True
 
-            await asyncio.gather(
-                _consume_subagent_messages(),
-                _consume_subagent_tool_calls(),
-            )
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(_consume_subagent_messages())
+                tasks.create_task(_consume_subagent_tool_calls())
 
             error = str(getattr(subagent_stream, "error", "") or "")
             if error:
@@ -540,7 +551,17 @@ async def on_message(message: cl.Message):
                         if last_msg is not None
                         else f"Status: {getattr(subagent_stream, 'status', 'completed')}"
                     )[:10000]
+        except asyncio.CancelledError:
+            step.output = "已取消。"
+            raise
+        except Exception as exc:
+            # A handled child failure must not abort its healthy parent stream.
+            step.is_error = True
+            step.output = _stream_error_text(exc)[:10000]
         finally:
+            if error := subagent_errors.get(call_id):
+                step.is_error = True
+                step.output = error[:10000]
             if step_sent:
                 try:
                     await step.update()
@@ -551,11 +572,9 @@ async def on_message(message: cl.Message):
         subagent_streams = getattr(run, "subagents", None)
         if subagent_streams is None:
             return
-        subagent_tasks: list[asyncio.Task[None]] = []
-        async for subagent_stream in subagent_streams:
-            subagent_tasks.append(asyncio.create_task(_consume_v3_subagent(subagent_stream)))
-        if subagent_tasks:
-            await asyncio.gather(*subagent_tasks)
+        async with asyncio.TaskGroup() as tasks:
+            async for subagent_stream in subagent_streams:
+                tasks.create_task(_consume_v3_subagent(subagent_stream))
 
     async def _process_v3_update_data(data: Any) -> None:
         if not isinstance(data, dict):
@@ -603,12 +622,11 @@ async def on_message(message: cl.Message):
                 version="v3",
                 transformers=[UpdatesTransformer],
             ) as run:
-                await asyncio.gather(
-                    _consume_v3_messages(run),
-                    _consume_v3_tool_calls(run),
-                    _consume_v3_subagents(run),
-                    _consume_v3_updates(run),
-                )
+                async with asyncio.TaskGroup() as tasks:
+                    tasks.create_task(_consume_v3_messages(run))
+                    tasks.create_task(_consume_v3_tool_calls(run))
+                    tasks.create_task(_consume_v3_subagents(run))
+                    tasks.create_task(_consume_v3_updates(run))
                 if await run.interrupted():
                     hitl_request = _extract_hitl_request_from_interrupts(await run.interrupts())
                 else:
@@ -640,8 +658,15 @@ async def on_message(message: cl.Message):
             pending_input = Command(resume=resume_payload)
             await cl.Message(content="🛂 已提交审批决策，继续执行...").send()
 
+    except asyncio.CancelledError:
+        final_response.content = "本次任务已取消。"
+        try:
+            await final_response.update()
+        except Exception:
+            logger.debug("[chat_app] Could not deliver cancellation status", exc_info=True)
+        raise
     except Exception as e:
-        final_response.content = f"[错误: {e}]"
+        final_response.content = f"[错误: {_stream_error_text(e)}]"
         await final_response.update()
         logger.error(f"[chat_app] Agent stream failed: {e}", exc_info=True)
 

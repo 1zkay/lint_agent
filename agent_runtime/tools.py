@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from langchain_community.tools import RequestsGetTool
 from langchain_community.utilities.requests import TextRequestsWrapper
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -51,8 +52,14 @@ async def load_agent_tools(
     mcp_tools = await load_mcp_tools(session)
 
     search_tools = [TavilySearch(max_results=5)] if os.getenv("TAVILY_API_KEY") else []
+    http_session = await exit_stack.enter_async_context(ClientSession(
+        timeout=ClientTimeout(total=30),
+        connector=TCPConnector(limit_per_host=4),
+        trust_env=True,
+        raise_for_status=True,
+    ))
     fetch_url_tool = RequestsGetTool(
-        requests_wrapper=TextRequestsWrapper(),
+        requests_wrapper=TextRequestsWrapper(aiosession=http_session),
         allow_dangerous_requests=True,
         name="fetch_url",
         description="Fetch the content of a URL. Input should be a URL string (e.g. https://example.com). Returns the text content of the page.",

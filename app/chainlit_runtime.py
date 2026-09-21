@@ -24,6 +24,8 @@ from memory.long_term import AgentContext, build_memory_store
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# The websocket session may disappear before its owner has finished cleanup.
+_runtime_tasks: set[asyncio.Task[None]] = set()
 
 
 def build_llm_for_runtime_config(runtime_cfg: Any):
@@ -77,19 +79,24 @@ def clear_runtime_session_state() -> None:
     cl.user_session.set("runtime_task", None)
     cl.user_session.set("runtime_close_event", None)
     cl.user_session.set("runtime_id", None)
+    cl.user_session.set("active_agent_tasks", None)
 
 
-async def stop_runtime_owner(*, wait: bool) -> None:
+async def stop_runtime_owner(*, wait: bool, reason: str = "reinitialize") -> None:
     """Ask the runtime owner task to close resources in its own task."""
     close_event = cl.user_session.get("runtime_close_event")
     runtime_task = cl.user_session.get("runtime_task")
 
     if close_event:
+        logger.info(
+            "[chat_app] Closing runtime (thread_id=%s, runtime_id=%s, reason=%s)",
+            cl.user_session.get("thread_id"), cl.user_session.get("runtime_id"), reason,
+        )
         close_event.set()
 
     if wait and runtime_task:
         try:
-            await runtime_task
+            await asyncio.shield(runtime_task)
         except Exception as exc:
             logger.warning("[chat_app] Runtime owner close error: %s", exc)
 
@@ -97,6 +104,8 @@ async def stop_runtime_owner(*, wait: bool) -> None:
 async def _run_chat_runtime_owner(
     *,
     runtime_id: str,
+    thread_id: str,
+    active_agent_tasks: set[asyncio.Task[Any]],
     llm: Any,
     runtime_cfg: Any,
     ready_future: asyncio.Future[dict[str, Any]],
@@ -173,10 +182,19 @@ async def _run_chat_runtime_owner(
             logger.warning("[chat_app] Runtime owner error: %s", exc)
     finally:
         try:
+            # Cancel and join users of the resources before closing connections.
+            active_tasks = tuple(active_agent_tasks)
+            for task in active_tasks:
+                if not task.done() and not task.cancelling():
+                    task.cancel()
+            if active_tasks:
+                await asyncio.gather(*active_tasks, return_exceptions=True)
             await exit_stack.aclose()
-            logger.info("[chat_app] MCP session closed")
+            logger.info(
+                "[chat_app] Runtime closed (thread_id=%s, runtime_id=%s)", thread_id, runtime_id,
+            )
         except Exception as exc:
-            logger.warning("[chat_app] MCP session close error: %s", exc)
+            logger.warning("[chat_app] Runtime close error: %s", exc)
         finally:
             if cl.user_session.get("runtime_id") == runtime_id:
                 clear_runtime_session_state()
@@ -213,10 +231,13 @@ async def initialize_chat_runtime(
 
     runtime_id = str(uuid.uuid4())
     close_event = asyncio.Event()
+    active_agent_tasks: set[asyncio.Task[Any]] = set()
     ready_future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
     runtime_task = asyncio.create_task(
         _run_chat_runtime_owner(
             runtime_id=runtime_id,
+            thread_id=thread_id,
+            active_agent_tasks=active_agent_tasks,
             llm=llm,
             runtime_cfg=runtime_cfg,
             ready_future=ready_future,
@@ -226,6 +247,9 @@ async def initialize_chat_runtime(
     cl.user_session.set("runtime_id", runtime_id)
     cl.user_session.set("runtime_close_event", close_event)
     cl.user_session.set("runtime_task", runtime_task)
+    cl.user_session.set("active_agent_tasks", active_agent_tasks)
+    _runtime_tasks.add(runtime_task)
+    runtime_task.add_done_callback(_runtime_tasks.discard)
 
     try:
         setup_payload = await ready_future

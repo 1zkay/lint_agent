@@ -28,6 +28,13 @@ TODO_STATUS_MAP = {
 }
 
 
+def stream_error_text(exc: BaseException) -> str:
+    """Show the underlying errors, not TaskGroup's wrapper message."""
+    if isinstance(exc, BaseExceptionGroup):
+        return "; ".join(dict.fromkeys(stream_error_text(error) for error in exc.exceptions))
+    return str(exc) or type(exc).__name__
+
+
 async def sync_todos_to_tasklist(todos: list[dict]) -> None:
     """将主智能体 TodoListMiddleware 的 todos 同步到 Chainlit TaskList 面板。"""
     task_list = cl.user_session.get("task_list")
