@@ -9,21 +9,21 @@ dependencies:
       - aiofiles==24.1.0
       - boto3==1.42.62
       - chainlit==2.12.0
-      - deepagents==0.7.15
+      - deepagents==0.7.19
       - faiss-cpu==1.13.2
       - fastmcp==3.1.0
-      - langchain==1.4.1
-      - langchain-anthropic==1.7.2
+      - langchain==1.4.3
+      - langchain-anthropic==1.7.4
       - langchain-community==0.4.2
-      - langchain-core==1.6.3
+      - langchain-core==1.6.5
       - langchain-google-genai==4.4.0
       - langchain-huggingface==1.2.2
       - langchain-mcp-adapters==0.3.2
       - langchain-ollama==1.1.0
-      - langchain-openai==1.6.2
+      - langchain-openai==1.6.6
       - langchain-tavily==0.2.18
       - langchain-text-splitters==1.1.2
-      - langgraph==1.2.11
+      - langgraph==1.2.12
       - langgraph-api==0.10.2
       - langgraph-checkpoint==4.2.0
       - langgraph-checkpoint-postgres==3.1.2

@@ -30,6 +30,7 @@ from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.exceptions import ModelError
 
 from config import config
+from agent_runtime.model_errors import OpenAIResponsesErrorMiddleware
 from agent_runtime.reflection import ReflectionMiddleware
 from agent_runtime.subagents import build_lint_subagents
 from workspace.host_paths import (
@@ -299,6 +300,9 @@ def _build_retry_middleware(
             config.agent_model_retry_max,
             model_retry_on_failure,
         )
+
+    # Normalize provider errors inside the retry boundary on both agent levels.
+    middleware_stack.append(OpenAIResponsesErrorMiddleware())
 
     if config.agent_enable_tool_retry:
         middleware_stack.append(

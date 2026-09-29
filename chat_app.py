@@ -93,6 +93,7 @@ from agent_runtime.contracts import ROOT_CAUSE_WORKFLOW_TOOL_NAME
 from agent_runtime.message_types import (
     AIMessage,
     HumanMessage,
+    ToolMessage,
     message_text as _message_text,
     message_tool_calls as _message_tool_calls,
 )
@@ -306,8 +307,8 @@ async def _run_agent_message(message: cl.Message):
     final_response = await cl.Message(content="正在处理…").send()
 
     _reported_usage_message_keys: set[str] = set()
-    subagent_steps: dict[str, cl.Step] = {}
-    subagent_errors: dict[str, str] = {}
+    tool_steps: dict[tuple[str | None, str], cl.Step] = {}
+    tool_errors: dict[tuple[str | None, str], str] = {}
 
     def _usage_message_key(message: Any) -> str:
         message_id = str(getattr(message, "id", "") or "").strip()
@@ -398,6 +399,26 @@ async def _run_agent_message(message: cl.Message):
         async for _delta in tool_call_stream:
             pass
 
+    async def _show_tool_error(
+        call_id: str, tool_name: str, error: str, *, parent_id: str | None = None,
+    ) -> None:
+        call_key = (parent_id, call_id)
+        tool_errors[call_key] = error
+        step = tool_steps.get(call_key)
+        is_new = step is None
+        if is_new:
+            step = cl.Step(
+                name=_step_name("tool", tool_name), type="tool", parent_id=parent_id,
+                default_open=True, auto_collapse=parent_id is not None,
+            )
+            tool_steps[call_key] = step
+        step.is_error = True
+        step.output = error[:10000]
+        if is_new:
+            await step.send()
+        else:
+            await step.update()
+
     async def _consume_v3_tool_call(
         tool_call_stream: Any,
         *,
@@ -418,39 +439,44 @@ async def _run_agent_message(message: cl.Message):
             if not error and getattr(output, "status", None) == "error":
                 error = _message_text(output)
             if error:
-                call_id = tool_call_stream.tool_call_id
-                subagent_errors[call_id] = error
-                if step := subagent_steps.get(call_id):
-                    step.is_error = True
-                    step.output = error[:output_limit]
-                    await step.update()
+                await _show_tool_error(
+                    tool_call_stream.tool_call_id, tool_name, error, parent_id=parent_id,
+                )
             return
 
         step_input, show_input = _tool_input_for_step(tool_input)
 
-        step = cl.Step(
-            name=_step_name("tool", tool_name),
-            type="tool",
-            parent_id=parent_id,
-            show_input=show_input,
-            default_open=default_open,
-            auto_collapse=parent_id is not None,
-        )
+        call_id = tool_call_stream.tool_call_id
+        call_key = (parent_id, call_id)
+        step = tool_steps.get(call_key)
+        step_sent = step is not None
+        if step is None:
+            step = cl.Step(
+                name=_step_name("tool", tool_name),
+                type="tool",
+                parent_id=parent_id,
+                show_input=show_input,
+                default_open=default_open,
+                auto_collapse=parent_id is not None,
+            )
+            tool_steps[call_key] = step
         step.input = step_input
-        step_sent = False
+        step.show_input = show_input
 
         try:
-            await step.send()
-            step_sent = True
+            if not step_sent:
+                await step.send()
+                step_sent = True
 
             await _consume_v3_tool_output_deltas(tool_call_stream, step)
 
             error = str(getattr(tool_call_stream, "error", "") or "")
+            output = getattr(tool_call_stream, "output", None)
+            if not error and getattr(output, "status", None) == "error":
+                error = _message_text(output) or "工具执行失败。"
             if error:
-                step.is_error = True
-                step.output = error[:output_limit]
+                await _show_tool_error(call_id, tool_name, error, parent_id=parent_id)
             else:
-                output = getattr(tool_call_stream, "output", "")
                 output_text = _message_text(output) or (str(output) if output is not None else "")
                 if output_text:
                     step.output = output_text[:output_limit]
@@ -464,6 +490,9 @@ async def _run_agent_message(message: cl.Message):
             step.is_error = True
             step.output = _stream_error_text(exc)[:output_limit]
         finally:
+            if error := tool_errors.get(call_key):
+                step.is_error = True
+                step.output = error[:output_limit]
             if step_sent:
                 try:
                     await step.update()
@@ -480,12 +509,18 @@ async def _run_agent_message(message: cl.Message):
             getattr(subagent_stream, "name", None)
             or "subagent"
         )
-        step = cl.Step(name=f"🤖 {subagent_name}", type="run", default_open=True)
         cause = getattr(subagent_stream, "cause", None) or {}
         call_id = str(cause.get("tool_call_id") or "")
-        if call_id:
-            subagent_steps[call_id] = step
-        step_sent = False
+        call_key = (None, call_id)
+        step = tool_steps.get(call_key)
+        step_sent = step is not None
+        if step is None:
+            step = cl.Step(name=f"🤖 {subagent_name}", type="run", default_open=True)
+            if call_id:
+                tool_steps[call_key] = step
+        else:
+            step.name = f"🤖 {subagent_name}"
+            step.type = "run"
         output_buffer = ""
 
         async def _consume_subagent_messages() -> None:
@@ -523,13 +558,19 @@ async def _run_agent_message(message: cl.Message):
                         )
                     )
 
+        async def _consume_subagent_updates() -> None:
+            async for data in subagent_stream.updates:
+                await _process_v3_update_data(data, parent_id=step.id)
+
         try:
-            await step.send()
-            step_sent = True
+            if not step_sent:
+                await step.send()
+                step_sent = True
 
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(_consume_subagent_messages())
                 tasks.create_task(_consume_subagent_tool_calls())
+                tasks.create_task(_consume_subagent_updates())
 
             error = str(getattr(subagent_stream, "error", "") or "")
             if error:
@@ -559,7 +600,7 @@ async def _run_agent_message(message: cl.Message):
             step.is_error = True
             step.output = _stream_error_text(exc)[:10000]
         finally:
-            if error := subagent_errors.get(call_id):
+            if error := tool_errors.get(call_key):
                 step.is_error = True
                 step.output = error[:10000]
             if step_sent:
@@ -576,12 +617,28 @@ async def _run_agent_message(message: cl.Message):
             async for subagent_stream in subagent_streams:
                 tasks.create_task(_consume_v3_subagent(subagent_stream))
 
-    async def _process_v3_update_data(data: Any) -> None:
+    async def _process_v3_update_data(data: Any, *, parent_id: str | None = None) -> None:
         if not isinstance(data, dict):
             return
 
         for source, update in data.items():
             if not isinstance(update, dict):
+                continue
+
+            # Middleware/argument validation can return before a tool lifecycle
+            # begins. Render those errors from the documented state updates too.
+            for msg in update.get("messages") or []:
+                if not isinstance(msg, ToolMessage) or msg.status != "error":
+                    continue
+                if msg.name == "write_todos" and not config.chainlit_show_todo_list:
+                    continue
+                await _show_tool_error(
+                    msg.tool_call_id, msg.name or "tool", _message_text(msg) or "工具执行失败。",
+                    parent_id=parent_id,
+                )
+
+            # Child todo lists and internal nodes do not replace the main UI.
+            if parent_id is not None:
                 continue
 
             todos_update = update.get("todos")
