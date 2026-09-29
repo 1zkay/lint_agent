@@ -46,6 +46,7 @@ from agent_runtime.message_types import (
 from llm.factory import (
     build_chat_model_from_config,
     build_openrouter_default_headers,
+    build_responses_client_kwargs,
 )
 
 logger = logging.getLogger(__name__)
@@ -165,6 +166,8 @@ class HardwareReferenceAgenticRAGService:
             "chunk_size": cfg.rag_embed_batch_size,
             "timeout": cfg.llm_timeout,
         }
+        # The embedding URL can inherit LLM_BASE_URL, including its /responses suffix.
+        kwargs.update(build_responses_client_kwargs(cfg.rag_embed_base_url))
         default_headers = build_openrouter_default_headers(cfg.rag_embed_base_url, cfg)
         if default_headers:
             kwargs["default_headers"] = default_headers
