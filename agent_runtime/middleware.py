@@ -163,10 +163,11 @@ def normalize_skill_sources(sources: list[str], root_dir: str | Path) -> list[st
     return deduped_sources
 
 
-def _build_deep_agent_system_prompt(system_prompt: str) -> str:
+def _build_deep_agent_system_prompt(system_prompt: str, mcp_instructions: str) -> str:
     parts = [
         system_prompt,
         FILESYSTEM_PATH_SYSTEM_PROMPT,
+        mcp_instructions,
     ]
     return "\n\n".join(part.strip() for part in parts if part and part.strip())
 
@@ -323,11 +324,12 @@ def create_lint_deep_agent(
     root_dir: str | Path,
     log_prefix: str,
     system_prompt: str,
+    tool_retry_tools: list[Any],
+    mcp_instructions: str = "",
     checkpointer: Any | None = None,
     store: Any | None = None,
     context_schema: type[Any] | None = None,
     name: str | None = None,
-    tool_retry_tools: list[Any] | None = None,
     model_retry_on_failure: Literal["continue", "error"] = "continue",
 ) -> tuple[Any, list[str], list[str]]:
     """Create the ALINT agent through the official DeepAgents entrypoint."""
@@ -338,8 +340,6 @@ def create_lint_deep_agent(
         ["execute"] if deepagents_filesystem.supports_execution(backend) else []
     )
     filesystem_tools = [*_PROJECT_FILESYSTEM_TOOLS, *runtime_tool_names]
-    # Only retry explicitly supplied tools, never an entire delegated task.
-    retry_tools = tools if tool_retry_tools is None else tool_retry_tools
 
     normalized_skill_sources = normalize_skill_sources(config.agent_skills_dirs, root_path)
     skill_sources = normalized_skill_sources if config.agent_enable_skills and normalized_skill_sources else None
@@ -367,12 +367,15 @@ def create_lint_deep_agent(
         # general-purpose agent's tool and middleware configuration explicit.
         subagents.append({
             **GENERAL_PURPOSE_SUBAGENT,
+            "system_prompt": "\n\n".join(filter(None, [
+                GENERAL_PURPOSE_SUBAGENT["system_prompt"], mcp_instructions,
+            ])),
             "model": llm,
             "tools": tools,
             "skills": skill_sources or [],
             "middleware": [FilesystemMiddleware(backend=backend, tools=filesystem_tools)],
         })
-        retry_tool_names = {tool.name for tool in retry_tools}
+        retry_tool_names = {tool.name for tool in tool_retry_tools}
         for subagent in subagents:
             subagent["middleware"].extend(_build_retry_middleware(
                 log_prefix=f"{log_prefix}:{subagent['name']}",
@@ -405,7 +408,7 @@ def create_lint_deep_agent(
         backend=backend,
         filesystem_tools=filesystem_tools,
         log_prefix=log_prefix,
-        tool_retry_tools=retry_tools,
+        tool_retry_tools=tool_retry_tools,
         model_retry_on_failure=model_retry_on_failure,
     )
     if runtime_tool_names:
@@ -419,7 +422,7 @@ def create_lint_deep_agent(
     agent = create_deep_agent(
         model=llm,
         tools=tools,
-        system_prompt=_build_deep_agent_system_prompt(system_prompt),
+        system_prompt=_build_deep_agent_system_prompt(system_prompt, mcp_instructions),
         middleware=middleware_stack,
         subagents=subagents,
         skills=skill_sources,

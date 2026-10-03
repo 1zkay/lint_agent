@@ -143,6 +143,8 @@ async def _run_chat_runtime_owner(
             ensemble_size=runtime_cfg.lint_root_cause_ensemble_size,
             root_dir=PROJECT_ROOT,
             log_prefix="[chat_app:lint_root_cause]",
+            tool_retry_tools=loaded_tools.tool_retry_tools,
+            mcp_instructions=loaded_tools.mcp_instructions,
         )
         tools = [*base_tools, root_cause_tool]
         tool_names = [*tool_names, root_cause_tool.name]
@@ -152,10 +154,11 @@ async def _run_chat_runtime_owner(
             root_dir=PROJECT_ROOT,
             log_prefix="[chat_app]",
             system_prompt=SYSTEM_PROMPT,
+            mcp_instructions=loaded_tools.mcp_instructions,
             checkpointer=checkpointer,
             store=memory_store,
             context_schema=AgentContext,
-            tool_retry_tools=base_tools,
+            tool_retry_tools=loaded_tools.tool_retry_tools,
         )
         tool_names = list(dict.fromkeys([*tool_names, *runtime_tool_names]))
         logger.info("[chat_app] Available agent tools: %s", tool_names)

@@ -8,7 +8,7 @@ from deepagents.backends.protocol import BackendProtocol
 from deepagents.middleware.filesystem import FilesystemMiddleware, FsToolName
 from deepagents.middleware.subagents import SubAgent
 
-REFERENCE_TOOL_NAMES = {"query_reference_docs"}
+REFERENCE_TOOL_NAMES = {"query_reference_docs", "vivado_doc_search"}
 _READ_ONLY_FILESYSTEM_TOOLS: tuple[FsToolName, ...] = (
     "ls",
     "read_file",

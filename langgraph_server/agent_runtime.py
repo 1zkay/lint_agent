@@ -101,9 +101,13 @@ async def lint_agent_graph(runtime: ServerRuntime | None = None) -> AsyncIterato
                 log_prefix="[agent_runtime]",
             )
             base_tools = loaded_tools.tools
+            tool_retry_tools = loaded_tools.tool_retry_tools
             tool_names = loaded_tools.tool_names
+            mcp_instructions = loaded_tools.mcp_instructions
         else:
             base_tools = []
+            tool_retry_tools = []
+            mcp_instructions = ""
 
         root_cause_tool = build_root_cause_workflow_tool(
             llm,
@@ -116,6 +120,8 @@ async def lint_agent_graph(runtime: ServerRuntime | None = None) -> AsyncIterato
             ensemble_size=runtime_cfg.lint_root_cause_ensemble_size,
             root_dir=REPO_ROOT,
             log_prefix="[agent_runtime:lint_root_cause]",
+            tool_retry_tools=tool_retry_tools,
+            mcp_instructions=mcp_instructions,
         )
         tools = [*base_tools, root_cause_tool]
 
@@ -125,9 +131,10 @@ async def lint_agent_graph(runtime: ServerRuntime | None = None) -> AsyncIterato
             root_dir=REPO_ROOT,
             log_prefix="[agent_runtime]",
             system_prompt=SYSTEM_PROMPT,
+            mcp_instructions=mcp_instructions,
             store=store,
             context_schema=AgentContext,
-            tool_retry_tools=base_tools,
+            tool_retry_tools=tool_retry_tools,
         )
         if is_execution:
             tool_names = list(

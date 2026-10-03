@@ -31,6 +31,8 @@ def build_root_cause_workflow(
     ensemble_size: int,
     root_dir: str | Path,
     log_prefix: str,
+    tool_retry_tools: list[Any],
+    mcp_instructions: str = "",
     store: Any | None = None,
 ) -> Any:
     """Build the compiled workflow with agents limited to the base tool set."""
@@ -42,9 +44,10 @@ def build_root_cause_workflow(
         log_prefix=f"{log_prefix}:filelist_resolver",
         system_prompt=FILELIST_RESOLVER_SYSTEM_PROMPT,
         store=store,
+        mcp_instructions=mcp_instructions,
         context_schema=AgentContext,
         name="lint_yosys_filelist_resolver",
-        tool_retry_tools=base_tools,
+        tool_retry_tools=tool_retry_tools,
         model_retry_on_failure="error",
     )
     classifier_agent, _, _ = create_lint_deep_agent(
@@ -54,9 +57,10 @@ def build_root_cause_workflow(
         log_prefix=f"{log_prefix}:classifier",
         system_prompt=CLASSIFIER_SYSTEM_PROMPT,
         store=store,
+        mcp_instructions=mcp_instructions,
         context_schema=AgentContext,
         name="lint_slice_classifier",
-        tool_retry_tools=base_tools,
+        tool_retry_tools=tool_retry_tools,
         model_retry_on_failure="error",
     )
     analysis_batch_agent, _, _ = create_lint_deep_agent(
@@ -66,9 +70,10 @@ def build_root_cause_workflow(
         log_prefix=f"{log_prefix}:analysis_batch",
         system_prompt=ROOT_CAUSE_ANALYSIS_BATCH_SYSTEM_PROMPT,
         store=store,
+        mcp_instructions=mcp_instructions,
         context_schema=AgentContext,
         name="lint_root_cause_analysis_batch",
-        tool_retry_tools=base_tools,
+        tool_retry_tools=tool_retry_tools,
         model_retry_on_failure="error",
     )
     merge_agent, _, _ = create_lint_deep_agent(
@@ -78,9 +83,10 @@ def build_root_cause_workflow(
         log_prefix=f"{log_prefix}:global_merge",
         system_prompt=ROOT_CAUSE_GLOBAL_MERGE_SYSTEM_PROMPT,
         store=store,
+        mcp_instructions=mcp_instructions,
         context_schema=AgentContext,
         name="lint_root_cause_global_merge",
-        tool_retry_tools=base_tools,
+        tool_retry_tools=tool_retry_tools,
         model_retry_on_failure="error",
     )
     judge_agent, _, _ = create_lint_deep_agent(
@@ -90,9 +96,10 @@ def build_root_cause_workflow(
         log_prefix=f"{log_prefix}:judge",
         system_prompt=ROOT_CAUSE_JUDGE_SYSTEM_PROMPT,
         store=store,
+        mcp_instructions=mcp_instructions,
         context_schema=AgentContext,
         name="lint_root_cause_judge",
-        tool_retry_tools=base_tools,
+        tool_retry_tools=tool_retry_tools,
         model_retry_on_failure="error",
     )
     return build_workflow(
@@ -116,6 +123,8 @@ def build_root_cause_workflow_tool(
     ensemble_size: int,
     root_dir: str | Path,
     log_prefix: str,
+    tool_retry_tools: list[Any],
+    mcp_instructions: str = "",
 ) -> BaseTool:
     """Return a native tool that builds the workflow only when invoked."""
 
@@ -144,6 +153,8 @@ def build_root_cause_workflow_tool(
             ensemble_size=ensemble_size,
             root_dir=root_dir,
             log_prefix=log_prefix,
+            tool_retry_tools=tool_retry_tools,
+            mcp_instructions=mcp_instructions,
             store=runtime.store,
         )
         result = await workflow.ainvoke(

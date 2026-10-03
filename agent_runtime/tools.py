@@ -4,32 +4,29 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from langchain_community.tools import RequestsGetTool
 from langchain_community.utilities.requests import TextRequestsWrapper
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_tavily import TavilySearch
 
+from agent_runtime.mcp import load_agent_mcp_tools
 from rag.hardware_reference import build_hardware_reference_agentic_rag_tool
 from config import config
 from memory.long_term import build_memory_tools
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
 
 @dataclass
 class LoadedAgentTools:
     tools: list[Any]
     tool_names: list[str]
+    tool_retry_tools: list[Any]
+    mcp_instructions: str = ""
 
 
 async def load_agent_tools(
@@ -38,18 +35,7 @@ async def load_agent_tools(
     log_prefix: str,
 ) -> LoadedAgentTools:
     """Load MCP, RAG, web, fetch-url, memory, and middleware-visible tools."""
-    client = MultiServerMCPClient(
-        {
-            "alint": {
-                "command": sys.executable,
-                "args": ["-m", "mcp_server.server"],
-                "cwd": str(PROJECT_ROOT),
-                "transport": "stdio",
-            }
-        }
-    )
-    session = await exit_stack.enter_async_context(client.session("alint"))
-    mcp_tools = await load_mcp_tools(session)
+    mcp_tools, mcp_instructions = await load_agent_mcp_tools(exit_stack, log_prefix=log_prefix)
 
     search_tools = [TavilySearch(max_results=5)] if os.getenv("TAVILY_API_KEY") else []
     http_session = await exit_stack.enter_async_context(ClientSession(
@@ -71,15 +57,23 @@ async def load_agent_tools(
         logger.warning("%s hardware-reference agentic RAG tool init failed: %s", log_prefix, exc)
         rag_tool = None
 
-    tools = [
-        *mcp_tools,
+    native_tools = [
         *([rag_tool] if rag_tool else []),
         *search_tools,
         fetch_url_tool,
         *build_memory_tools(),
     ]
+    tools = [*mcp_tools, *native_tools]
+    # Configured MCP servers must explicitly declare retry-safe behavior.
+    retryable_mcp_tools = [
+        tool for tool in mcp_tools
+        if any((tool.metadata or {}).get(hint) is True
+               for hint in ("readOnlyHint", "idempotentHint"))
+    ]
     tool_names = list(dict.fromkeys(getattr(tool, "name", str(tool)) for tool in tools))
     return LoadedAgentTools(
         tools=tools,
         tool_names=tool_names,
+        tool_retry_tools=[*retryable_mcp_tools, *native_tools],
+        mcp_instructions=mcp_instructions,
     )

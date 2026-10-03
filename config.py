@@ -197,6 +197,14 @@ class Config:
             os.getenv("LINT_ROOT_CAUSE_JUDGE_TEMPERATURE", "0.0")
         )
 
+        # AMD Ross MCP servers (optional; skills use AGENT_EXTRA_SKILLS_DIRS).
+        self.vivado_mcp_command = os.path.expanduser(os.getenv("VIVADO_MCP_COMMAND", "").strip())
+        self.vivado_path = os.path.expanduser(os.getenv("VIVADO_PATH", "").strip())
+        self.amd_doc_search_enabled = self._bool_env("AMD_DOC_SEARCH_ENABLED", "false")
+        self.amd_doc_search_url = os.getenv(
+            "AMD_DOC_SEARCH_URL", "https://ross.amd.com/mcp/doc-search"
+        ).strip()
+
         # Agentic RAG (built-in reference PDFs)
         self.rag_enabled = self._bool_env("RAG_ENABLED", "true")
         self.rag_pdf_paths = self._collect_rag_pdf_paths(

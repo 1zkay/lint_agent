@@ -42,7 +42,9 @@ DeepAgents create_deep_agent
   |-- Agentic RAG tool
   |
   v
-MCP Client over stdio
+MultiServerMCPClient
+  |-- Vivado MCP: stdio bridge (optional)
+  |-- AMD Doc Search: Streamable HTTP (optional)
   |
   v
 FastMCP Server: python -m mcp_server.server
@@ -358,6 +360,7 @@ lint_agent/
     middleware.py                     # Shared middleware builders
     prompts.py                        # Shared agent prompts
     reflection.py                     # Evaluator-optimizer middleware
+    mcp.py                            # ALINT and optional Ross MCP connections
     tools.py                          # Shared MCP/RAG/web/memory tool loading
   compat/
     langgraph.py                      # Third-party compatibility patches
@@ -389,6 +392,62 @@ AGENT_EXTRA_SKILLS_DIRS=customer_skills
 In Docker packages, `./customer-config/skills` is mounted to
 `customer_skills`, so customers can add `skill-name/SKILL.md` directories
 without rebuilding the image.
+
+## AMD Ross integration
+
+Both the Chainlit and LangGraph runtimes use `agent_runtime/mcp.py` with
+`langchain-mcp-adapters==0.3.2`. The existing ALINT MCP server remains required;
+Ross services are optional and disabled by default in `.env.example`.
+
+Configure the actual installed paths in your local `.env`:
+
+```env
+VIVADO_MCP_COMMAND=/path/to/vivado-ai-extension/bin/vivado-mcp-server-linux-amd64-2026.9.1
+VIVADO_PATH=/path/to/Vivado/2026.1/bin/vivado
+AMD_DOC_SEARCH_ENABLED=true
+AMD_DOC_SEARCH_URL=https://ross.amd.com/mcp/doc-search
+AGENT_ENABLE_SKILLS=true
+AGENT_SKILLS_DIRS=skills
+AGENT_EXTRA_SKILLS_DIRS=customer_skills,/path/to/vivado-ai-extension/resources/plugin-bundled/skills
+```
+
+- Vivado uses AMD's `--stdio-bridge` and a persistent MCP session. The official
+  `load_mcp_server_info()` and `load_mcp_tools()` APIs provide server instructions
+  and tools. Original instructions are passed separately to agent prompts; tool
+  metadata is left unchanged. The official `ToolRetryMiddleware` receives an
+  explicit tool list: MCP tools from configured, trusted servers qualify only
+  when `readOnlyHint` or `idempotentHint` is `true`. Missing, `null`, or `false`
+  hints do not opt a tool into automatic retries. Native tools keep their
+  existing retry policy; delegated tasks are not automatically retried.
+- AMD document search uses Streamable HTTP and the adapter's default session per
+  tool call; `get_server_info()` retrieves its startup instructions. An
+  optional server whose tool discovery fails is logged and skipped at startup.
+  If only the separate instructions request fails, discovered tools remain
+  available. Persistent stdio sessions still require a successful handshake.
+  Restart the runtime after configuring or restoring a skipped server.
+- `vivado_doc_search` retrieves AMD documentation through the hosted service.
+  It needs no local embedding model. The existing `query_reference_docs` tool
+  continues to use the separate IEEE index and configured embedding model.
+- DeepAgents loads the original Ross `SKILL.md` files on demand. Keep each entire
+  skill directory, including scripts and references. Skill availability does not imply
+  that its required Vivado/Vitis version or supporting tools are installed.
+
+The VS Code extension provides the reusable server binary and skill files;
+VS Code does not need to remain open. Extension updates can change these paths.
+AMD documents Vivado 2026.1 as the tested baseline; check each skill's version
+requirements before using an older installation such as Vivado 2022.2.
+
+Restart Chainlit or the LangGraph server after changing `.env`, then start a new
+session. Existing Docker images need rebuilding to include this Python code.
+For Docker, install or mount the complete Ross files and EDA tools inside the
+container and use container-visible paths. Host absolute paths and the local
+MCP daemon's same-user access do not automatically cross container boundaries.
+
+Official references: [AMD Vivado MCP setup](https://github.com/Xilinx/ross-ai-assistant/blob/main/docs/getting-started/vivado-mcp.md),
+[LangChain MCP adapters](https://github.com/langchain-ai/langchain-mcp-adapters),
+[LangChain tool retries](https://docs.langchain.com/oss/python/langchain/middleware/built-in#tool-retry),
+[MCP tool annotations](https://modelcontextprotocol.io/specification/2025-11-25/schema#toolannotations),
+[DeepAgents skills](https://docs.langchain.com/oss/python/deepagents/skills).
 
 ## Generated Files and Git Policy
 
